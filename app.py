@@ -1376,7 +1376,6 @@ if hist_close is not None and not hist_close.empty:
                 "Content-Type": "application/x-www-form-urlencoded",
             }
             
-            # 使用雙軌 AJAX t146sb05 綜合彙總板 Endpoint，避免單點故障
             endpoints = [
                 "https://mopsov.twse.com.tw/mops/web/ajax_t146sb05",
                 "https://mops.twse.com.tw/mops/web/ajax_t146sb05"
@@ -1406,68 +1405,33 @@ if hist_close is not None and not hist_close.empty:
                         continue
                     
                     soup = BeautifulSoup(resp.text, "html.parser")
-                    has_data = False
-                    tables = soup.find_all("table")
                     
-                    # 🚀 A. 解析「公司近期發布之重大訊息」表格
-                    for table in tables:
-                        rows = table.find_all("tr")
-                        for row in rows:
-                            cols = row.find_all("td")
-                            # 重訊表行結構：cols[0] 為日期，cols[1] 內含有 button
-                            if len(cols) == 2:
-                                date_text = cols[0].get_text(strip=True)
-                                if not re.match(r"^\d{2,3}/\d{1,2}/\d{1,2}$", date_text):
-                                    continue
-                                if current_tw_year_str not in date_text:
-                                    continue
+                    # 🚀 使用與 Playwright 相同的「扁平文字流」提取法，以空格連接單元格，保證 100% 抓取相同資料量
+                    page_text = soup.get_text("   ")
+                    lines = page_text.split('\n')
+                    
+                    has_data = False
+                    for line in lines:
+                        clean_line = line.strip()
+                        if not clean_line or "詳細資料" in clean_line or "主旨" in clean_line:
+                            continue
+                        
+                        # 尋找包含民國年份日期的行，且長度足夠 (大於10個字)
+                        if f"{current_tw_year_str}/" in clean_line and len(clean_line) > 10:
+                            if "請輸入" in clean_line or "公司代碼" in clean_line or "歷史查詢" in clean_line:
+                                continue
+                            
+                            # 提取整行文字，把非標準空格清除，並與 Playwright 對齊
+                            formatted_line = clean_line.replace("\xa0", " ").strip()
+                            
+                            date_obj = parse_to_date_object(formatted_line)
+                            if date_obj and is_within_last_30_days(date_obj):
+                                found_news.append({
+                                    "text": formatted_line,
+                                    "is_today": (date_obj == today_date_obj)
+                                })
+                                has_data = True
                                 
-                                btn = cols[1].find("button")
-                                if btn:
-                                    title_text = btn.get_text(strip=True)
-                                    title_text = title_text.replace("\xa0", " ").strip()
-                                    if len(title_text) < 5:
-                                        continue
-                                    
-                                    full_line = f"{date_text}  {title_text}"
-                                    date_obj = parse_to_date_object(date_text)
-                                    if date_obj and is_within_last_30_days(date_obj):
-                                        found_news.append({
-                                            "text": full_line,
-                                            "is_today": (date_obj == today_date_obj)
-                                        })
-                                        has_data = True
-                                        
-                    # 🚀 B. 解析「最近期股利分配」表格 (獲取除權息、股票/現金股利、股東會日期)
-                    div_title = soup.find(lambda tag: tag.name == "div" and "最近期股利分配" in tag.text)
-                    if div_title:
-                        div_table = div_title.find_next("table")
-                        if div_table:
-                            rows = div_table.find_all("tr")
-                            if len(rows) >= 5:
-                                # rows[2] td結構: [0]董事會日期 [1]股東會日期 [2]現金股利 [3]股票股利
-                                cols2 = rows[2].find_all("td")
-                                # rows[4] td結構: [0]權利分派日 [1]除權/除息交易日 [2]現金股利發放日
-                                cols4 = rows[4].find_all("td")
-                                
-                                if len(cols2) >= 4 and len(cols4) >= 2:
-                                    agm_date = cols2[1].get_text(strip=True)
-                                    cash_div = cols2[2].get_text(strip=True)
-                                    stock_div = cols2[3].get_text(strip=True)
-                                    ex_date = cols4[1].get_text(strip=True)
-                                    
-                                    # 除權息交易日格式正確且為當前年份
-                                    if re.match(r"^\d{2,3}/\d{1,2}/\d{1,2}$", ex_date) and current_tw_year_str in ex_date:
-                                        # 組裝出完美的股利除權息重大公告行
-                                        full_div_line = f"{ex_date}  【除權息公告】股東會日期: {agm_date} | 盈餘分配之股票股利: {float(stock_div):.2f}元 | 除權/除息交易日: {ex_date} | 現金股利: {float(cash_div):.2f}元"
-                                        date_obj = parse_to_date_object(ex_date)
-                                        if date_obj and is_within_last_30_days(date_obj):
-                                            found_news.append({
-                                                "text": full_div_line,
-                                                "is_today": (date_obj == today_date_obj)
-                                            })
-                                            has_data = True
-                                            
                     if has_data:
                         break  # 任一站點成功取得資料即跳出
                 except Exception:
@@ -1599,29 +1563,21 @@ if hist_close is not None and not hist_close.empty:
                         clean_stocks.append(stock)
                 
                 # 專屬 CSS：將重訊掃描結果儀表板調整為無背景、無黑底、字體稍大的卡片樣式
-                st.markdown("""
-                    <style>
-                    div[data-testid="stMetric"] {
-                        background-color: transparent !important;
-                        border: none !important;
-                        box-shadow: none !important;
-                        padding: 0px !important;
-                    }
-                    div[data-testid="stMetricValue"] {
-                        font-size: 26px !important;
-                        font-weight: bold !important;
-                    }
-                    div[data-testid="stMetricLabel"] {
-                        font-size: 14px !important;
-                    }
-                    </style>
+                # 🚀 3. 高級儀表板卡片 (與第一分頁相同風格，透明無黑底)
+                st.markdown(f"""
+                    <div style="display: flex; gap: 15px; margin-bottom: 20px; margin-top: 10px;">
+                        <div style="flex: 1; background: rgba(255, 255, 255, 0.05); border-radius: 8px; padding: 15px; border: 1px solid rgba(255, 255, 255, 0.1); box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+                            <span style="font-size: 13px; color: #888888; font-weight: 500;">📋 近 30 天重要訊息總數</span><br>
+                            <span style="font-size: 26px; font-weight: bold; color: #ff4b4b;">{total_alerts} 筆</span>
+                            <span style="font-size: 12px; margin-left: 8px; color: {'#ff4b4b' if total_alerts > 0 else '#00cc66'}">{'🔴 警告' if total_alerts > 0 else '🟢 安全'}</span>
+                        </div>
+                        <div style="flex: 1; background: rgba(255, 255, 255, 0.05); border-radius: 8px; padding: 15px; border: 1px solid rgba(255, 255, 255, 0.1); box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+                            <span style="font-size: 13px; color: #888888; font-weight: 500;">🔥 今日最新即時發布</span><br>
+                            <span style="font-size: 26px; font-weight: bold; color: #ffaa00;">{today_alerts} 筆</span>
+                            <span style="font-size: 12px; margin-left: 8px; color: {'#ffaa00' if today_alerts > 0 else '#888888'}">{'🔥 今日' if today_alerts > 0 else '無今日發布'}</span>
+                        </div>
+                    </div>
                 """, unsafe_allow_html=True)
-                
-                col_sum1, col_sum2 = st.columns(2)
-                with col_sum1:
-                    st.metric("近 30 天重要訊息總數", f"{total_alerts} 筆", delta="🔴 警告" if total_alerts > 0 else "🟢 安全")
-                with col_sum2:
-                    st.metric("今日最新即時發布", f"{today_alerts} 筆", delta="🔥 今日" if today_alerts > 0 else "無今日發布", delta_color="inverse" if today_alerts > 0 else "normal")
                 
                 st.markdown("---")
                 
@@ -1651,15 +1607,29 @@ if hist_close is not None and not hist_close.empty:
                             )
                             for news_item in news_list_sorted:
                                 if news_item["is_today"]:
-                                    st.error(f"🔥 【今日即時】{news_item['text']}")
+                                    st.markdown(f"""
+                                        <div style="padding: 12px; margin-bottom: 8px; background: rgba(255, 75, 75, 0.06); border-left: 4px solid #ff4b4b; border-radius: 6px; border: 1px solid rgba(255, 75, 75, 0.15);">
+                                            <span style="color: #ff4b4b; font-weight: bold; font-size: 13px; margin-right: 8px;">🔥【今日即時】</span>
+                                            <span style="color: #ffffff; font-size: 14px; font-family: sans-serif;">{news_item['text']}</span>
+                                        </div>
+                                    """, unsafe_allow_html=True)
                                 else:
-                                    st.warning(f"• {news_item['text']}")
+                                    st.markdown(f"""
+                                        <div style="padding: 12px; margin-bottom: 8px; background: rgba(255, 255, 255, 0.02); border-left: 4px solid #ffd166; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.05);">
+                                            <span style="color: #ffd166; font-weight: bold; font-size: 13px; margin-right: 8px;">• 歷史重訊</span>
+                                            <span style="color: #e0e0e0; font-size: 14px; font-family: sans-serif;">{news_item['text']}</span>
+                                        </div>
+                                    """, unsafe_allow_html=True)
                 
                 if clean_stocks:
-                    clean_displays = [f"{get_stock_name_by_code(s)} ({s})" for s in clean_stocks]
+                    clean_displays_html = "".join([f"<span style='display: inline-block; background: rgba(0, 204, 102, 0.08); color: #00cc66; border: 1px solid rgba(0, 204, 102, 0.2); border-radius: 20px; padding: 4px 12px; margin: 4px; font-size: 13px;'>✅ {get_stock_name_by_code(s)} ({s})</span>" for s in clean_stocks])
                     with st.expander(f"✅ 近一個月內無重訊個股 (共 {len(clean_stocks)} 檔)", expanded=False):
-                        st.write(", ".join(clean_displays))
-                        
+                        st.markdown(f"""
+                            <div style="padding: 10px; background: rgba(255,255,255,0.01); border-radius: 8px; border: 1px dashed rgba(255,255,255,0.05); display: flex; flex-wrap: wrap;">
+                                {clean_displays_html}
+                            </div>
+                        """, unsafe_allow_html=True)
+                
                 st.success("🎉 重訊掃描任務精準執行完成！")
 else:
     st.info("ℹ️ 無法載入歷史報價，請檢查代號格式正確，且 Yahoo Finance 網路連線正常。")
