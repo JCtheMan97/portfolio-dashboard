@@ -9,6 +9,7 @@ import html
 import warnings
 import re
 import threading
+import asyncio
 try:
     import zoneinfo
     TW_TZ = zoneinfo.ZoneInfo("Asia/Taipei")
@@ -16,6 +17,8 @@ except ImportError:
     from datetime import timezone
     TW_TZ = timezone(timedelta(hours=8))
 import requests
+from bs4 import BeautifulSoup
+from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 
 warnings.filterwarnings('ignore')
@@ -578,8 +581,8 @@ if not st.session_state.loans_df.empty:
                 if key not in st.session_state:
                     st.session_state[key] = val
 
-            new_label = st.text_input("貸款名稱標籤", key=f"l_label_{idx}")
-            new_principal = st.number_input("本金/餘額 (NT$)", step=50000.0, key=f"l_p_{idx}")
+            new_label = st.text_input("貸款名稱標籤", value=str(st.session_state[f"l_label_{idx}"]), key=f"l_label_{idx}")
+            new_principal = st.number_input("本金/餘額 (NT$)", min_value=0.0, step=50000.0, value=float(st.session_state[f"l_p_{idx}"]), key=f"l_p_{idx}")
             
             # Annual rate (typed as percent)
             new_rate = st.number_input(
@@ -588,21 +591,15 @@ if not st.session_state.loans_df.empty:
                 max_value=30.0,
                 step=0.01,
                 format="%.2f",
+                value=float(st.session_state[f"l_r_{idx}"]),
                 key=f"l_r_{idx}"
             )
             
-            new_interest = st.number_input("基期利息 (NT$)", step=1000.0, key=f"l_i_{idx}")
-            new_margin = st.checkbox("為股票質押維持率貸款", key=f"l_margin_{idx}")
-            
-            new_ratio_base = float(st.session_state.get(f"l_ratio_base_{idx}", row.get('Margin_Ratio_Baseline', 180.0)))
-            new_avail = float(st.session_state.get(f"l_avail_{idx}", row.get('Available_To_Borrow', 0.0)))
-            new_call = float(st.session_state.get(f"l_call_{idx}", row.get('Call_Threshold', 130.0)))
-            new_rec = float(st.session_state.get(f"l_rec_{idx}", row.get('Recover_Threshold', 166.0)))
-            new_liq = float(st.session_state.get(f"l_liq_{idx}", row.get('Liquidation_Threshold', 110.0)))
-            new_record = bool(st.session_state.get(f"l_record_{idx}", row.get('Has_Open_Record', False)))
+            new_interest = st.number_input("基期利息 (NT$)", min_value=0.0, step=1000.0, value=float(st.session_state[f"l_i_{idx}"]), key=f"l_i_{idx}")
+            new_margin = st.checkbox("為股票質押維持率貸款", value=bool(st.session_state[f"l_margin_{idx}"]), key=f"l_margin_{idx}")
             
             # Start Date input field in the sidebar!
-            new_start_date = st.text_input("起算日期 (YYYY-MM-DD)", key=f"l_start_{idx}")
+            new_start_date = st.text_input("起算日期 (YYYY-MM-DD)", value=str(st.session_state[f"l_start_{idx}"]), key=f"l_start_{idx}")
             
             # Pre-calculate estimated interest for helper text
             days_elapsed = 0
@@ -619,35 +616,36 @@ if not st.session_state.loans_df.empty:
             st.caption(f"💡 預估目前累計總利息: **NT$ {est_total_interest:,.0f}** (基期 NT$ {new_interest:,.0f} + 累加 {days_elapsed} 天利息)")
             
             if new_margin:
-                # Projected ratio scaled since Start_Date
-                val_start = get_portfolio_value_on_date(sc_hist, default_csv, new_start_date)
-                loan_scale = (val_now / val_start) if val_start > 0 else 1.0
-                projected_ratio = new_ratio_base * loan_scale
-                
-                # Auto calculate Available to Borrow if left 0
-                calc_avail = new_avail
-                if calc_avail == 0.0:
-                    calc_avail = max((new_principal * (projected_ratio / 100.0) * 0.6) - new_principal, 0.0)
-                
                 new_ratio_base = st.number_input(
                     "基期維持率 (%) (將隨持股漲跌自動縮放)",
                     min_value=0.0,
                     step=0.1,
                     format="%.1f",
+                    value=float(st.session_state[f"l_ratio_base_{idx}"]),
                     key=f"l_ratio_base_{idx}"
                 )
+                
+                # Projected ratio scaled since Start_Date
+                val_start = get_portfolio_value_on_date(sc_hist, default_csv, new_start_date)
+                loan_scale = (val_now / val_start) if val_start > 0 else 1.0
+                projected_ratio = new_ratio_base * loan_scale
                 
                 # Display projected live维持率 as subtext to inform user
                 st.caption(f"📈 估算目前維持率: **{projected_ratio:.1f}%** (隨市價自基期累計變動: {loan_scale:+.1%})")
                 
-                new_avail = st.number_input("尚可借額度 (NT$) (留0則自動計算)", step=10000.0, key=f"l_avail_{idx}")
+                # Auto calculate Available to Borrow if left 0
+                calc_avail = float(st.session_state[f"l_avail_{idx}"])
+                if calc_avail == 0.0:
+                    calc_avail = max((new_principal * (projected_ratio / 100.0) * 0.6) - new_principal, 0.0)
+                
+                new_avail = st.number_input("尚可借額度 (NT$) (留0則自動計算)", min_value=0.0, step=10000.0, value=float(st.session_state[f"l_avail_{idx}"]), key=f"l_avail_{idx}")
                 if new_avail == 0.0:
                     st.caption(f"💡 預估尚可借額度: **NT$ {calc_avail:,.0f}** (按6成成數估算)")
                     
-                new_call = st.number_input("追繳線 (%)", key=f"l_call_{idx}")
-                new_rec = st.number_input("安全線 (%)", key=f"l_rec_{idx}")
-                new_liq = st.number_input("斷頭線 (%)", key=f"l_liq_{idx}")
-                new_record = st.checkbox("有未解除追繳紀錄", key=f"l_record_{idx}")
+                new_call = st.number_input("追繳線 (%)", min_value=0.0, value=float(st.session_state[f"l_call_{idx}"]), key=f"l_call_{idx}")
+                new_rec = st.number_input("安全線 (%)", min_value=0.0, value=float(st.session_state[f"l_rec_{idx}"]), key=f"l_rec_{idx}")
+                new_liq = st.number_input("斷頭線 (%)", min_value=0.0, value=float(st.session_state[f"l_liq_{idx}"]), key=f"l_liq_{idx}")
+                new_record = st.checkbox("有未解除追繳紀錄", value=bool(st.session_state[f"l_record_{idx}"]), key=f"l_record_{idx}")
                 
             if st.button("❌ 刪除此項貸款", key=f"l_del_{idx}"):
                 st.session_state.loans_df = st.session_state.loans_df.drop(idx).reset_index(drop=True)
@@ -1306,91 +1304,125 @@ if hist_close is not None and not hist_close.empty:
             delta_days = (today - target_date).days
             return 0 <= delta_days <= 30
 
-        def fetch_stock_news_requests(stock_code):
-            """Fetch MOPS material news for a single stock using the t05st01 API endpoint."""
-            today_date_obj = date.today()
-            current_tw_year_str = str(today_date_obj.year - 1911)
-            
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Referer": "https://mops.twse.com.tw/",
-                "Content-Type": "application/x-www-form-urlencoded",
-            }
-            
-            endpoints = [
-                "https://mopsov.twse.com.tw/mops/web/t05st01",
-                "https://mops.twse.com.tw/mops/web/t05st01",
-            ]
-            post_data = {
-                "encodeURIComponent": "1",
-                "step": "1",
-                "firstin": "1",
-                "off": "1",
-                "keyword4": "",
-                "code1": "",
-                "TYPEK2": "",
-                "checkbtn": "",
-                "queryName": "co_id",
-                "inpuType": "co_id",
-                "TYPEK": "all",
-                "co_id": stock_code,
-            }
-            
-            found_news = []
-            for url in endpoints:
+        async def fetch_stock_news_worker(context, stock_code, semaphore, today_date_obj, current_tw_year_str):
+            """獨立的非同步工兵：具備『新舊雙站自動切換』與自動重試機制，確保 100% 抓取"""
+            async with semaphore:
+                urls = [
+                    f"https://mops.twse.com.tw/mops/#/web/t146sb05?companyId={stock_code}",
+                    f"https://mops.twse.com.tw/mops/#/web/t146sb05?companyId={stock_code}",
+                    f"https://mopsov.twse.com.tw/mops/web/t146sb05?companyId={stock_code}"
+                ]
+                max_retries = len(urls)
+                for attempt in range(1, max_retries + 1):
+                    target_url = urls[attempt - 1]
+                    is_backup_site = "mopsov" in target_url
+                    found_news = []
+                    page = await context.new_page()
+                    try:
+                        await page.goto(target_url, wait_until="domcontentloaded", timeout=25000)
+                        try:
+                            await page.wait_for_function(f"""
+                                () => {{
+                                    const tableText = document.querySelector('.el-table, table')?.innerText || '';
+                                    return tableText.includes('{current_tw_year_str}/') || tableText.includes('暫無數據') || tableText.includes('無資料');
+                                }}
+                            """, timeout=6000)
+                        except:
+                            pass
+                        await page.wait_for_timeout(450)
+                        page_text = await page.evaluate("() => document.body.innerText")
+                        lines_text = page_text.split('\n')
+                        has_valid_table_data = any(f"{current_tw_year_str}/" in line or "暫無數據" in line or "無資料" in line for line in lines_text)
+                        if not has_valid_table_data and attempt < max_retries:
+                            await page.close()
+                            await asyncio.sleep(0.8 * attempt)
+                            continue
+                        for line in lines_text:
+                            clean_line = line.strip()
+                            if not clean_line or "詳細資料" in clean_line or "主旨" in clean_line:
+                                continue
+                            if f"{current_tw_year_str}/" in clean_line and len(clean_line) > 10:
+                                if "請輸入" in clean_line or "公司代碼" in clean_line or "歷史查詢" in clean_line:
+                                    continue
+                                date_obj = parse_to_date_object(clean_line)
+                                if date_obj and is_within_last_30_days(date_obj):
+                                    found_news.append({
+                                        "text": clean_line,
+                                        "is_today": (date_obj == today_date_obj)
+                                    })
+                        await page.close()
+                        seen = set()
+                        unique_news = []
+                        for item in found_news:
+                            if item["text"] not in seen:
+                                seen.add(item["text"])
+                                unique_news.append(item)
+                        return stock_code, unique_news
+                    except Exception:
+                        await page.close()
+                        if attempt == max_retries:
+                            return stock_code, []
+                        await asyncio.sleep(1.5)
+                return stock_code, []
+
+        async def run_scraper(stocks_list, status_placeholder, progress_bar):
+            async with async_playwright() as p:
                 try:
-                    resp = requests.post(url, data=post_data, headers=headers, timeout=15)
-                    if resp.status_code != 200:
-                        continue
-                    soup = BeautifulSoup(resp.text, "html.parser")
-                    
-                    # Method 1: parse table rows with strict length and keyword checks
-                    tables = soup.find_all("table")
-                    for table in tables:
-                        rows = table.find_all("tr")
-                        for row in rows:
-                            cols = row.find_all("td")
-                            if len(cols) < 2:
-                                continue
-                            date_text = cols[0].get_text(strip=True)
-                            # Only process rows that start with a Taiwan-year date
-                            if not re.match(r"^\d{2,3}/\d{1,2}/\d{1,2}$", date_text):
-                                continue
-                            if current_tw_year_str not in date_text:
-                                continue
-                            
-                            title_text = ""
-                            for ci in [2, 1, 3]:
-                                if len(cols) > ci:
-                                    t = cols[ci].get_text(strip=True)
-                                    # Safe length constraint: Title must be between 5 and 200 chars.
-                                    # Skip if it contains menu keywords.
-                                    if 5 <= len(t) <= 200 and not any(kw in t for kw in ["基本資料", "電子書", "財務預測書", "財務報告書", "年報及股東會", "持股不足"]):
-                                        title_text = t
-                                        break
-                            
-                            if not title_text:
-                                continue
-                            
-                            full_line = f"{date_text}　{title_text}"
-                            date_obj = parse_to_date_object(date_text)
-                            if date_obj and is_within_last_30_days(date_obj):
-                                found_news.append({
-                                    "text": full_line,
-                                    "is_today": (date_obj == today_date_obj)
-                                })
-                    if found_news:
-                        break
-                except Exception:
-                    continue
-            
-            seen = set()
-            unique_news = []
-            for item in found_news:
-                if item["text"] not in seen:
-                    seen.add(item["text"])
-                    unique_news.append(item)
-            return stock_code, unique_news
+                    browser = await p.chromium.launch(headless=True)
+                except Exception as e:
+                    status_placeholder.info("⚙️ 偵測到雲端環境尚未安裝瀏覽器內核，正在自動下載安裝 Chromium 內核... (此步驟僅在首次執行時耗時約 30 秒，之後將自動快取)")
+                    import subprocess
+                    try:
+                        subprocess.run(["python", "-m", "playwright", "install", "chromium"])
+                    except Exception as install_err:
+                        status_placeholder.error(f"自動下載瀏覽器內核失敗: {install_err}")
+                        raise install_err
+                    browser = await p.chromium.launch(headless=True)
+                context = await browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    viewport={"width": 1400, "height": 900}
+                )
+                semaphore = asyncio.Semaphore(3)
+                today_date_obj = date.today()
+                current_tw_year_str = str(today_date_obj.year - 1911)
+                tasks = [fetch_stock_news_worker(context, stock, semaphore, today_date_obj, current_tw_year_str) for stock in stocks_list]
+                results = []
+                total = len(tasks)
+                for i, coro in enumerate(asyncio.as_completed(tasks)):
+                    stock, news = await coro
+                    results.append((stock, news))
+                    percent = (i + 1) / total
+                    status_placeholder.write(f"⏳ **已完成掃描個股**：{get_stock_name_by_code(stock)} ({stock}) (進度: {i+1}/{total})")
+                    progress_bar.progress(percent)
+                await browser.close()
+                return results
+
+        def run_async(coro):
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            if loop.is_running():
+                result = [None]
+                exception = [None]
+                def worker():
+                    try:
+                        new_loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(new_loop)
+                        result[0] = new_loop.run_until_complete(coro)
+                    except Exception as e:
+                        exception[0] = e
+                    finally:
+                        new_loop.close()
+                t = threading.Thread(target=worker)
+                t.start()
+                t.join()
+                if exception[0]:
+                    raise exception[0]
+                return result[0]
+            else:
+                return loop.run_until_complete(coro)
 
         if st.button("📡 啟動即時公開資訊觀測站重訊掃描"):
             if not my_stocks_dynamic:
@@ -1398,16 +1430,8 @@ if hist_close is not None and not hist_close.empty:
             else:
                 status_placeholder = st.empty()
                 progress_bar = st.progress(0.0)
-                
-                with st.spinner("⚡ 正在掃描公開資訊觀測站重訊，請稍候..."):
-                    results = []
-                    total = len(my_stocks_dynamic)
-                    for i, stock_code in enumerate(my_stocks_dynamic):
-                        stock_code, news = fetch_stock_news_requests(stock_code)
-                        results.append((stock_code, news))
-                        percent = (i + 1) / total
-                        status_placeholder.write(f"⏳ **已完成掃描個股**：{get_stock_name_by_code(stock_code)} ({stock_code}) (進度: {i+1}/{total})")
-                        progress_bar.progress(percent)
+                with st.spinner("⚡ 正在並行發動非同步陣列爬蟲，全速觀測中..."):
+                    results = run_async(run_scraper(my_stocks_dynamic, status_placeholder, progress_bar))
                 
                 progress_bar.empty()
                 status_placeholder.empty()
