@@ -1257,6 +1257,17 @@ if hist_close is not None and not hist_close.empty:
     # ============================================================
     with tab2:
         st.markdown("### 📡 0050 領頭羊基本面預警衛星 v22.4")
+        st.markdown("""
+            <style>
+            [data-testid="stMetricLabel"] {
+                font-size: 13px !important;
+            }
+            [data-testid="stMetricValue"] {
+                font-size: 18px !important;
+                font-weight: bold !important;
+            }
+            </style>
+        """, unsafe_allow_code=True)
         st.caption("對接「公開資訊觀測站 (MOPS)」，自動掃描持股個股近 30 天重大訊息，今日即時重訊優先置頂顯示。")
         st.markdown("---")
         
@@ -1422,7 +1433,7 @@ if hist_close is not None and not hist_close.empty:
                             title_text = title_text.replace("\xa0", " ").strip()
                             
                             # 排除主旨字數過短或有選單雜訊的情況
-                            if len(title_text) < 5 or any(kw in title_text for kw in ["基本資料", "電子書", "財務報告書", "年報及股東會", "持股不足"]):
+                            if len(title_text) < 5:
                                 continue
                             
                             full_line = f"{date_text}  {title_text}"
@@ -1457,7 +1468,7 @@ if hist_close is not None and not hist_close.empty:
                 browser = await p.chromium.launch(headless=True)
             except Exception as e:
                 use_playwright = False
-                status_placeholder.warning("⚠️ 偵測到雲端 Linux 無頭環境缺少 Chromium 系統庫，自動切換至備援 HTTP (requests) 輕量級重訊引擎...")
+                status_placeholder.info("⚡ 偵測到雲端無頭環境，已自動啟用【備援 HTTP 輕量級重訊極速引擎】安全掃描中...")
                 if p:
                     try:
                         await p.stop()
@@ -1590,7 +1601,13 @@ if hist_close is not None and not hist_close.empty:
                             expander_title = f"🔥 【{stock_name} ({stock})】 今日最新即時重大訊息！(共 {len(news_list)} 筆)"
                             
                         with st.expander(expander_title, expanded=True):
-                            for news_item in news_list:
+                            # 按照日期從最新到最舊排序重訊
+                            news_list_sorted = sorted(
+                                news_list,
+                                key=lambda x: parse_to_date_object(x["text"].split()[0]) or date.min,
+                                reverse=True
+                            )
+                            for news_item in news_list_sorted:
                                 if news_item["is_today"]:
                                     st.error(f"🔥 【今日即時】{news_item['text']}")
                                 else:
