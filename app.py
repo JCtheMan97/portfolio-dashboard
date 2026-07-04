@@ -1263,21 +1263,9 @@ if hist_close is not None and not hist_close.empty:
     # Tab 2: Live MOPS Alerts Scraper Integration
     # ============================================================
     with tab2:
-        st.markdown("""
-        <div style='background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%); 
-                    padding: 24px 28px; border-radius: 16px; margin-bottom: 20px;
-                    border: 1px solid rgba(99,179,237,0.2);'>
-            <h2 style='color:#63b3ed; margin:0 0 8px 0; font-size:22px; font-weight:800;'>
-                📡 0050 領頭羊基本面預警衛星 v22.4
-            </h2>
-            <p style='color:#a0aec0; margin:0 0 6px 0; font-size:14px;'>
-                【工業級雙軌備援・全雲端相容版】本工兵對接「公開資訊觀測站 (MOPS)」，以輕量化 HTTP 引擎精準抓取重大訊息，完整相容 Streamlit Cloud 雲端環境。
-            </p>
-            <p style='color:#718096; margin:0; font-size:12px;'>
-                ⚡ 引擎：requests + BeautifulSoup ・ 🔒 無需瀏覽器核心 ・ ☁️ 完整雲端相容 ・ 📊 即時解析 MOPS 公開資料表
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown("### 📡 0050 領頭羊基本面預警衛星 v22.4")
+        st.caption("對接「公開資訊觀測站 (MOPS)」，自動掃描持股個股近 30 天重大訊息，今日即時重訊優先置頂顯示。")
+        st.markdown("---")
         
         active_tickers = active_stock_df['Ticker'].tolist()
         my_stocks_dynamic = [t.split('.')[0] for t in active_tickers if t != 'REALIZED_CASH']
@@ -1298,8 +1286,8 @@ if hist_close is not None and not hist_close.empty:
         with col_info3:
             st.metric("🌐 資料來源", "MOPS 公開資訊觀測站")
         
-        with st.expander(f"📋 展開查看目前監控個股清單 (共 {len(my_stocks_dynamic)} 檔)", expanded=False):
-            st.write(f"`{', '.join(monitor_list_display)}`")
+        with st.expander(f"📋 目前監控個股清單 (共 {len(my_stocks_dynamic)} 檔)", expanded=False):
+            st.write(", ".join(monitor_list_display))
         
         def parse_to_date_object(date_str):
             try:
@@ -1319,50 +1307,77 @@ if hist_close is not None and not hist_close.empty:
             return 0 <= delta_days <= 30
 
         def fetch_stock_news_requests(stock_code):
-            """Fetch MOPS news for a single stock using requests (no browser needed)."""
+            """Fetch MOPS material news for a single stock using the t05st01 API endpoint."""
             today_date_obj = date.today()
             current_tw_year_str = str(today_date_obj.year - 1911)
             
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                 "Referer": "https://mops.twse.com.tw/",
                 "Content-Type": "application/x-www-form-urlencoded",
             }
             
-            # Use MOPS old-site API which returns parseable HTML (not SPA)
-            urls = [
-                f"https://mopsov.twse.com.tw/mops/web/t146sb05",
-                f"https://mops.twse.com.tw/mops/web/t146sb05",
+            # t05st01 = "重大訊息與公告" page — returns a clean HTML table of announcements only
+            endpoints = [
+                "https://mopsov.twse.com.tw/mops/web/t05st01",
+                "https://mops.twse.com.tw/mops/web/t05st01",
             ]
             post_data = {
                 "encodeURIComponent": "1",
                 "step": "1",
                 "firstin": "1",
-                "co_id": stock_code,
+                "off": "1",
+                "keyword4": "",
+                "code1": "",
+                "TYPEK2": "",
+                "checkbtn": "",
+                "queryName": "co_id",
+                "inpuType": "co_id",
                 "TYPEK": "all",
+                "co_id": stock_code,
             }
             
             found_news = []
-            for url in urls:
+            for url in endpoints:
                 try:
-                    resp = requests.post(url, data=post_data, headers=headers, timeout=12)
+                    resp = requests.post(url, data=post_data, headers=headers, timeout=15)
                     if resp.status_code != 200:
                         continue
                     soup = BeautifulSoup(resp.text, "html.parser")
-                    rows = soup.select("table tr")
-                    for row in rows:
-                        cols = row.find_all("td")
-                        if len(cols) >= 3:
+                    
+                    # Find the main data table — it contains date in col[0] and subject in col[2]
+                    # Look for tables that have rows with Taiwan year dates like '115/'
+                    tables = soup.find_all("table")
+                    for table in tables:
+                        rows = table.find_all("tr")
+                        for row in rows:
+                            cols = row.find_all("td")
+                            if len(cols) < 2:
+                                continue
                             date_text = cols[0].get_text(strip=True)
-                            title_text = cols[2].get_text(strip=True) if len(cols) > 2 else cols[1].get_text(strip=True)
-                            if f"{current_tw_year_str}/" in date_text and len(title_text) > 3:
-                                full_line = f"{date_text} {title_text}"
-                                date_obj = parse_to_date_object(date_text)
-                                if date_obj and is_within_last_30_days(date_obj):
-                                    found_news.append({
-                                        "text": full_line,
-                                        "is_today": (date_obj == today_date_obj)
-                                    })
+                            # Only process rows that start with a Taiwan-year date
+                            if not re.match(r"^\d{3}/\d{2}/\d{2}$", date_text):
+                                continue
+                            if current_tw_year_str not in date_text:
+                                continue
+                            # Subject is usually col index 2 or 1
+                            title_text = ""
+                            for ci in [2, 1, 3]:
+                                if len(cols) > ci:
+                                    t = cols[ci].get_text(strip=True)
+                                    if len(t) > 3:
+                                        title_text = t
+                                        break
+                            if not title_text:
+                                continue
+                            
+                            full_line = f"{date_text}　{title_text}"
+                            date_obj = parse_to_date_object(date_text)
+                            if date_obj and is_within_last_30_days(date_obj):
+                                found_news.append({
+                                    "text": full_line,
+                                    "is_today": (date_obj == today_date_obj)
+                                })
                     if found_news:
                         break
                 except Exception:
