@@ -1317,7 +1317,6 @@ if hist_close is not None and not hist_close.empty:
                 "Content-Type": "application/x-www-form-urlencoded",
             }
             
-            # t05st01 = "重大訊息與公告" page — returns a clean HTML table of announcements only
             endpoints = [
                 "https://mopsov.twse.com.tw/mops/web/t05st01",
                 "https://mops.twse.com.tw/mops/web/t05st01",
@@ -1345,8 +1344,7 @@ if hist_close is not None and not hist_close.empty:
                         continue
                     soup = BeautifulSoup(resp.text, "html.parser")
                     
-                    # Find the main data table — it contains date in col[0] and subject in col[2]
-                    # Look for tables that have rows with Taiwan year dates like '115/'
+                    # Method 1: parse table rows with strict length and keyword checks
                     tables = soup.find_all("table")
                     for table in tables:
                         rows = table.find_all("tr")
@@ -1356,18 +1354,21 @@ if hist_close is not None and not hist_close.empty:
                                 continue
                             date_text = cols[0].get_text(strip=True)
                             # Only process rows that start with a Taiwan-year date
-                            if not re.match(r"^\d{3}/\d{2}/\d{2}$", date_text):
+                            if not re.match(r"^\d{2,3}/\d{1,2}/\d{1,2}$", date_text):
                                 continue
                             if current_tw_year_str not in date_text:
                                 continue
-                            # Subject is usually col index 2 or 1
+                            
                             title_text = ""
                             for ci in [2, 1, 3]:
                                 if len(cols) > ci:
                                     t = cols[ci].get_text(strip=True)
-                                    if len(t) > 3:
+                                    # Safe length constraint: Title must be between 5 and 200 chars.
+                                    # Skip if it contains menu keywords.
+                                    if 5 <= len(t) <= 200 and not any(kw in t for kw in ["基本資料", "電子書", "財務預測書", "財務報告書", "年報及股東會", "持股不足"]):
                                         title_text = t
                                         break
+                            
                             if not title_text:
                                 continue
                             
@@ -1424,12 +1425,12 @@ if hist_close is not None and not hist_close.empty:
                     else:
                         clean_stocks.append(stock)
                 
-                # Show Tab 2 summary
+                # Show Tab 2 summary in original clean metric style
                 col_sum1, col_sum2 = st.columns(2)
                 with col_sum1:
-                    render_metric_card("近 30 天重要訊息總數", f"{total_alerts} 筆", "30天內公開觀測站重大訊息總計", "#ef4444" if total_alerts > 0 else "#10b981")
+                    st.metric("近 30 天重要訊息總數", f"{total_alerts} 筆", delta="🔴 警告" if total_alerts > 0 else "🟢 安全")
                 with col_sum2:
-                    render_metric_card("今日最新即時發布", f"{today_alerts} 筆", "今日新公布之即時重訊", "#ef4444" if today_alerts > 0 else "#10b981")
+                    st.metric("今日最新即時發布", f"{today_alerts} 筆", delta="🔥 今日" if today_alerts > 0 else "無今日發布", delta_color="inverse" if today_alerts > 0 else "normal")
                 
                 st.markdown("---")
                 
@@ -1453,9 +1454,9 @@ if hist_close is not None and not hist_close.empty:
                         with st.expander(expander_title, expanded=True):
                             for news_item in news_list:
                                 if news_item["is_today"]:
-                                    st.markdown(f"<div style='color:#ef4444; font-weight:bold; padding: 4px 0;'>🔥 [今日即時] {news_item['text']}</div>", unsafe_allow_html=True)
+                                    st.error(f"🔥 【今日即時】{news_item['text']}")
                                 else:
-                                    st.markdown(f"<div style='color:gray; padding: 2px 0;'>• {news_item['text']}</div>", unsafe_allow_html=True)
+                                    st.warning(f"• {news_item['text']}")
                 
                 if clean_stocks:
                     clean_displays = [f"{get_stock_name_by_code(s)} ({s})" for s in clean_stocks]
