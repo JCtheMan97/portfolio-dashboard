@@ -1367,11 +1367,16 @@ if hist_close is not None and not hist_close.empty:
             
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Referer": "https://mops.twse.com.tw/",
+                "Referer": "https://mops.twse.com.tw/mops/web/t05st01",
                 "Content-Type": "application/x-www-form-urlencoded",
             }
             
-            url = "https://mopsov.twse.com.tw/mops/web/t05st01"
+            # 使用雙軌 AJAX Endpoint 備援抓取，避免單點故障
+            endpoints = [
+                "https://mopsov.twse.com.tw/mops/web/ajax_t05st01",
+                "https://mops.twse.com.tw/mops/web/ajax_t05st01"
+            ]
+            
             post_data = {
                 "encodeURIComponent": "1",
                 "step": "1",
@@ -1385,38 +1390,39 @@ if hist_close is not None and not hist_close.empty:
                 "inpuType": "co_id",
                 "TYPEK": "all",
                 "co_id": stock_code,
+                "year": current_tw_year_str,  # 必須帶入民國年度，否則會被 MOPS 拒絕查詢
             }
             
             found_news = []
-            try:
-                resp = requests.post(url, data=post_data, headers=headers, timeout=12)
-                if resp.status_code == 200:
+            for url in endpoints:
+                try:
+                    resp = requests.post(url, data=post_data, headers=headers, timeout=10)
+                    if resp.status_code != 200:
+                        continue
+                    
                     soup = BeautifulSoup(resp.text, "html.parser")
                     tables = soup.find_all("table")
+                    has_data = False
                     for table in tables:
                         rows = table.find_all("tr")
                         for row in rows:
                             cols = row.find_all("td")
-                            if len(cols) < 2:
+                            # AJAX 表格行結構：[0]公司代號 [1]公司簡稱 [2]發言日期 [3]發言時間 [4]主旨 [5]詳細資料按鈕
+                            if len(cols) < 5:
                                 continue
-                            date_text = cols[0].get_text(strip=True)
                             
-                            # 嚴格匹配 115/07/03 格式，且為當前民國年份
+                            date_text = cols[2].get_text(strip=True)
                             if not re.match(r"^\d{2,3}/\d{1,2}/\d{1,2}$", date_text):
                                 continue
                             if current_tw_year_str not in date_text:
                                 continue
                             
-                            # 提取主旨，長度在 5 到 200 之間，排除雜訊選單文字
-                            title_text = ""
-                            for ci in [2, 1, 3]:
-                                if len(cols) > ci:
-                                    t = cols[ci].get_text(strip=True)
-                                    if 5 <= len(t) <= 200 and not any(kw in t for kw in ["基本資料", "電子書", "財務預測書", "財務報告書", "年報及股東會", "持股不足"]):
-                                        title_text = t
-                                        break
+                            title_text = cols[4].get_text(strip=True)
+                            # 清理非標準空格
+                            title_text = title_text.replace("\xa0", " ").strip()
                             
-                            if not title_text:
+                            # 排除主旨字數過短或有選單雜訊的情況
+                            if len(title_text) < 5 or any(kw in title_text for kw in ["基本資料", "電子書", "財務報告書", "年報及股東會", "持股不足"]):
                                 continue
                             
                             full_line = f"{date_text}  {title_text}"
@@ -1426,8 +1432,11 @@ if hist_close is not None and not hist_close.empty:
                                     "text": full_line,
                                     "is_today": (date_obj == today_date_obj)
                                 })
-            except Exception:
-                pass
+                                has_data = True
+                    if has_data:
+                        break  # 任一站點成功取得資料即跳出
+                except Exception:
+                    continue
             
             seen = set()
             unique_news = []
@@ -1436,6 +1445,7 @@ if hist_close is not None and not hist_close.empty:
                     seen.add(item["text"])
                     unique_news.append(item)
             return unique_news
+
 
         async def run_scraper(stocks_list, status_placeholder, progress_bar):
             use_playwright = True
