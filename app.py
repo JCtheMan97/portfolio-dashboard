@@ -1338,7 +1338,19 @@ if hist_close is not None and not hist_close.empty:
 
         async def run_scraper(stocks_list, status_placeholder, progress_bar):
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True)
+                try:
+                    browser = await p.chromium.launch(headless=True)
+                except Exception as e:
+                    status_placeholder.info("⚙️ 偵測到雲端環境尚未安裝瀏覽器內核，正在自動下載安裝 Chromium 內核... (此步驟僅在首次執行時耗時約 30 秒，之後將自動快取)")
+                    import subprocess
+                    try:
+                        subprocess.run(["playwright", "install", "chromium"])
+                    except Exception as install_err:
+                        status_placeholder.error(f"自動下載瀏覽器內核失敗: {install_err}")
+                        raise install_err
+                    # Retry launching after installation
+                    browser = await p.chromium.launch(headless=True)
+                    
                 context = await browser.new_context(
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                     viewport={"width": 1400, "height": 900}
