@@ -1282,13 +1282,7 @@ if hist_close is not None and not hist_close.empty:
 
         monitor_list_display = [f"{get_stock_name_by_code(s)} ({s})" for s in my_stocks_dynamic]
         
-        col_info1, col_info2, col_info3 = st.columns(3)
-        with col_info1:
-            st.metric("📋 監控股票數", f"{len(my_stocks_dynamic)} 檔")
-        with col_info2:
-            st.metric("🔍 掃描範圍", "近 30 天重大訊息")
-        with col_info3:
-            st.metric("🌐 資料來源", "MOPS 公開資訊觀測站")
+        st.caption(f"📋 **監控股票數**：{len(my_stocks_dynamic)} 檔 | 🔍 **掃描範圍**：近 30 天重大訊息 | 🌐 **資料來源**：MOPS 公開資訊觀測站")
         
         with st.expander(f"📋 目前監控個股清單 (共 {len(my_stocks_dynamic)} 檔)", expanded=False):
             st.write(", ".join(monitor_list_display))
@@ -1372,20 +1366,20 @@ if hist_close is not None and not hist_close.empty:
                 return stock_code, []
 
         def fetch_stock_news_requests_fallback(stock_code):
-            """免瀏覽器核心的 HTTP 輕量級重訊爬蟲 (當 Playwright 因系統庫缺失崩潰時自動降級備援使用)"""
+            """免瀏覽器核心的 HTTP 輕量級綜合重訊與除權息爬蟲 (當 Playwright 崩潰時自動降級備援使用)"""
             today_date_obj = date.today()
             current_tw_year_str = str(today_date_obj.year - 1911)
             
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Referer": "https://mops.twse.com.tw/mops/web/t05st01",
+                "Referer": "https://mops.twse.com.tw/mops/web/t146sb05",
                 "Content-Type": "application/x-www-form-urlencoded",
             }
             
-            # 使用雙軌 AJAX Endpoint 備援抓取，避免單點故障
+            # 使用雙軌 AJAX t146sb05 綜合彙總板 Endpoint，避免單點故障
             endpoints = [
-                "https://mopsov.twse.com.tw/mops/web/ajax_t05st01",
-                "https://mops.twse.com.tw/mops/web/ajax_t05st01"
+                "https://mopsov.twse.com.tw/mops/web/ajax_t146sb05",
+                "https://mops.twse.com.tw/mops/web/ajax_t146sb05"
             ]
             
             post_data = {
@@ -1401,7 +1395,7 @@ if hist_close is not None and not hist_close.empty:
                 "inpuType": "co_id",
                 "TYPEK": "all",
                 "co_id": stock_code,
-                "year": current_tw_year_str,  # 必須帶入民國年度，否則會被 MOPS 拒絕查詢
+                "year": current_tw_year_str,
             }
             
             found_news = []
@@ -1412,38 +1406,68 @@ if hist_close is not None and not hist_close.empty:
                         continue
                     
                     soup = BeautifulSoup(resp.text, "html.parser")
-                    tables = soup.find_all("table")
                     has_data = False
+                    tables = soup.find_all("table")
+                    
+                    # 🚀 A. 解析「公司近期發布之重大訊息」表格
                     for table in tables:
                         rows = table.find_all("tr")
                         for row in rows:
                             cols = row.find_all("td")
-                            # AJAX 表格行結構：[0]公司代號 [1]公司簡稱 [2]發言日期 [3]發言時間 [4]主旨 [5]詳細資料按鈕
-                            if len(cols) < 5:
-                                continue
-                            
-                            date_text = cols[2].get_text(strip=True)
-                            if not re.match(r"^\d{2,3}/\d{1,2}/\d{1,2}$", date_text):
-                                continue
-                            if current_tw_year_str not in date_text:
-                                continue
-                            
-                            title_text = cols[4].get_text(strip=True)
-                            # 清理非標準空格
-                            title_text = title_text.replace("\xa0", " ").strip()
-                            
-                            # 排除主旨字數過短或有選單雜訊的情況
-                            if len(title_text) < 5:
-                                continue
-                            
-                            full_line = f"{date_text}  {title_text}"
-                            date_obj = parse_to_date_object(date_text)
-                            if date_obj and is_within_last_30_days(date_obj):
-                                found_news.append({
-                                    "text": full_line,
-                                    "is_today": (date_obj == today_date_obj)
-                                })
-                                has_data = True
+                            # 重訊表行結構：cols[0] 為日期，cols[1] 內含有 button
+                            if len(cols) == 2:
+                                date_text = cols[0].get_text(strip=True)
+                                if not re.match(r"^\d{2,3}/\d{1,2}/\d{1,2}$", date_text):
+                                    continue
+                                if current_tw_year_str not in date_text:
+                                    continue
+                                
+                                btn = cols[1].find("button")
+                                if btn:
+                                    title_text = btn.get_text(strip=True)
+                                    title_text = title_text.replace("\xa0", " ").strip()
+                                    if len(title_text) < 5:
+                                        continue
+                                    
+                                    full_line = f"{date_text}  {title_text}"
+                                    date_obj = parse_to_date_object(date_text)
+                                    if date_obj and is_within_last_30_days(date_obj):
+                                        found_news.append({
+                                            "text": full_line,
+                                            "is_today": (date_obj == today_date_obj)
+                                        })
+                                        has_data = True
+                                        
+                    # 🚀 B. 解析「最近期股利分配」表格 (獲取除權息、股票/現金股利、股東會日期)
+                    div_title = soup.find(lambda tag: tag.name == "div" and "最近期股利分配" in tag.text)
+                    if div_title:
+                        div_table = div_title.find_next("table")
+                        if div_table:
+                            rows = div_table.find_all("tr")
+                            if len(rows) >= 5:
+                                # rows[2] td結構: [0]董事會日期 [1]股東會日期 [2]現金股利 [3]股票股利
+                                cols2 = rows[2].find_all("td")
+                                # rows[4] td結構: [0]權利分派日 [1]除權/除息交易日 [2]現金股利發放日
+                                cols4 = rows[4].find_all("td")
+                                
+                                if len(cols2) >= 4 and len(cols4) >= 2:
+                                    agm_date = cols2[1].get_text(strip=True)
+                                    cash_div = cols2[2].get_text(strip=True)
+                                    stock_div = cols2[3].get_text(strip=True)
+                                    ex_date = cols4[1].get_text(strip=True)
+                                    
+                                    # 除權息交易日格式正確且為當前年份
+                                    if re.match(r"^\d{2,3}/\d{1,2}/\d{1,2}$", ex_date) and current_tw_year_str in ex_date:
+                                        # 組裝出完美的股利除權息重大公告行
+                                        full_div_line = f"{ex_date}  【除權息公告】股東會日期: {agm_date} | 盈餘分配之股票股利: {float(stock_div):.2f}元 | 除權/除息交易日: {ex_date} | 現金股利: {float(cash_div):.2f}元"
+                                        date_obj = parse_to_date_object(ex_date)
+                                        if date_obj and is_within_last_30_days(date_obj):
+                                            found_news.append({
+                                                "text": full_div_line,
+                                                "is_today": (date_obj == today_date_obj)
+                                            })
+                                            has_data = True
+                                            
                     if has_data:
                         break  # 任一站點成功取得資料即跳出
                 except Exception:
@@ -1574,7 +1598,25 @@ if hist_close is not None and not hist_close.empty:
                     else:
                         clean_stocks.append(stock)
                 
-                # Show Tab 2 summary in original clean metric style
+                # 專屬 CSS：將重訊掃描結果儀表板調整為無背景、無黑底、字體稍大的卡片樣式
+                st.markdown("""
+                    <style>
+                    div[data-testid="stMetric"] {
+                        background-color: transparent !important;
+                        border: none !important;
+                        box-shadow: none !important;
+                        padding: 0px !important;
+                    }
+                    div[data-testid="stMetricValue"] {
+                        font-size: 26px !important;
+                        font-weight: bold !important;
+                    }
+                    div[data-testid="stMetricLabel"] {
+                        font-size: 14px !important;
+                    }
+                    </style>
+                """, unsafe_allow_html=True)
+                
                 col_sum1, col_sum2 = st.columns(2)
                 with col_sum1:
                     st.metric("近 30 天重要訊息總數", f"{total_alerts} 筆", delta="🔴 警告" if total_alerts > 0 else "🟢 安全")
