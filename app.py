@@ -1268,8 +1268,6 @@ if hist_close is not None and not hist_close.empty:
             }
             </style>
         """, unsafe_allow_html=True)
-        st.caption("對接「公開資訊觀測站 (MOPS)」，自動掃描持股個股近 30 天重大訊息，今日即時重訊優先置頂顯示。")
-        st.markdown("---")
         
         active_tickers = active_stock_df['Ticker'].tolist()
         my_stocks_dynamic = [t.split('.')[0] for t in active_tickers if t != 'REALIZED_CASH']
@@ -1282,7 +1280,13 @@ if hist_close is not None and not hist_close.empty:
 
         monitor_list_display = [f"{get_stock_name_by_code(s)} ({s})" for s in my_stocks_dynamic]
         
-        st.caption(f"📋 **監控股票數**：{len(my_stocks_dynamic)} 檔 | 🔍 **掃描範圍**：近 30 天重大訊息 | 🌐 **資料來源**：MOPS 公開資訊觀測站")
+        # 將說明與監控標的資訊集中合併到同一個 HTML 框，移除 st.markdown("---") 以消除多餘空白與橫線
+        st.markdown(f"""
+            <div style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05); border-radius: 6px; padding: 12px; margin-bottom: 15px; margin-top: 10px;">
+                <span style="font-size: 13px; color: #aaaaaa; display: block; margin-bottom: 6px;">對接「公開資訊觀測站 (MOPS)」，自動掃描持股個股近 30 天重大訊息，今日即時重訊優先置頂顯示。</span>
+                <span style="font-size: 12px; color: #888888;">📋 <b>監控股票數</b>：{len(my_stocks_dynamic)} 檔 | 🔍 <b>掃描範圍</b>：近 30 天重大訊息 | 🌐 <b>資料來源</b>：MOPS 公開資訊觀測站</span>
+            </div>
+        """, unsafe_allow_html=True)
         
         with st.expander(f"📋 目前監控個股清單 (共 {len(my_stocks_dynamic)} 檔)", expanded=False):
             st.write(", ".join(monitor_list_display))
@@ -1370,8 +1374,21 @@ if hist_close is not None and not hist_close.empty:
             today_date_obj = date.today()
             current_tw_year_str = str(today_date_obj.year - 1911)
             
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            # 使用 Session 以預先獲取防爬蟲 Cookie (如 jcsession 等)
+            session = requests.Session()
+            
+            headers_get = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            }
+            
+            # 先 GET 獲取 Cookie
+            try:
+                session.get("https://mopsov.twse.com.tw/mops/web/t146sb05", headers=headers_get, timeout=6)
+            except:
+                pass
+                
+            headers_post = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 "Referer": "https://mops.twse.com.tw/mops/web/t146sb05",
                 "Content-Type": "application/x-www-form-urlencoded",
             }
@@ -1400,34 +1417,62 @@ if hist_close is not None and not hist_close.empty:
             found_news = []
             for url in endpoints:
                 try:
-                    resp = requests.post(url, data=post_data, headers=headers, timeout=10)
+                    # 更新 Referer 匹配站點
+                    headers_post["Referer"] = url.replace("/ajax_", "/")
+                    resp = session.post(url, data=post_data, headers=headers_post, timeout=10)
                     if resp.status_code != 200:
                         continue
                     
                     soup = BeautifulSoup(resp.text, "html.parser")
                     
-                    # 🚀 使用與 Playwright 相同的「扁平文字流」提取法，以空格連接單元格，保證 100% 抓取相同資料量
-                    page_text = soup.get_text("   ")
-                    lines = page_text.split('\n')
+                    # 🚀 tr 同行單元格空格拼接法：完美復刻 Playwright innerText 行為！
+                    lines = []
+                    for tr in soup.find_all("tr"):
+                        tds = tr.find_all("td")
+                        if tds:
+                            # 以三個空格連結所有單元格內容
+                            line_text = "   ".join([td.get_text(strip=True) for td in tds])
+                            lines.append(line_text)
                     
                     has_data = False
                     for line in lines:
-                        clean_line = line.strip()
-                        if not clean_line or "詳細資料" in clean_line or "主旨" in clean_line:
+                        clean = line.strip()
+                        if not clean or "詳細資料" in clean or "主旨" in clean:
                             continue
                         
-                        # 尋找包含民國年份日期的行，且長度足夠 (大於10個字)
-                        if f"{current_tw_year_str}/" in clean_line and len(clean_line) > 10:
-                            if "請輸入" in clean_line or "公司代碼" in clean_line or "歷史查詢" in clean_line:
-                                continue
-                            
-                            # 提取整行文字，把非標準空格清除，並與 Playwright 對齊
-                            formatted_line = clean_line.replace("\xa0", " ").strip()
-                            
-                            date_obj = parse_to_date_object(formatted_line)
+                        # A. 針對除權息股利分配的多日期行進行智慧解析與重組
+                        dates = re.findall(r"\d{3}/\d{2}/\d{2}", clean)
+                        numbers = re.findall(r"\d+\.\d+", clean)
+                        
+                        if len(dates) == 2 and len(numbers) >= 2:
+                            # 股利分配行 1 (決議、股東會、現金、股票股利)
+                            formatted = f"{dates[1]}  【股利分派公告】股東會日期: {dates[1]} | 盈餘分配之股票股利: {float(numbers[1]):.2f}元 | 除權/除息交易日: (請參閱除權息行) | 董事會決議日: {dates[0]} | 現金股利: {float(numbers[0]):.2f}元"
+                            date_obj = parse_to_date_object(dates[1])
                             if date_obj and is_within_last_30_days(date_obj):
                                 found_news.append({
-                                    "text": formatted_line,
+                                    "text": formatted,
+                                    "is_today": (date_obj == today_date_obj)
+                                })
+                                has_data = True
+                        elif len(dates) == 3:
+                            # 股利分配行 2 (基準日、除權息日、發放日)
+                            formatted = f"{dates[1]}  【除權息公告】除權/除息交易日: {dates[1]} | 權利分派基準日: {dates[0]} | 現金股利發放日: {dates[2]}"
+                            date_obj = parse_to_date_object(dates[1])
+                            if date_obj and is_within_last_30_days(date_obj):
+                                found_news.append({
+                                    "text": formatted,
+                                    "is_today": (date_obj == today_date_obj)
+                                })
+                                has_data = True
+                        elif f"{current_tw_year_str}/" in clean and len(clean) > 10:
+                            # B. 普通重大訊息行
+                            if "請輸入" in clean or "公司代碼" in clean or "歷史查詢" in clean:
+                                continue
+                            clean_formatted = clean.replace("\xa0", " ").strip()
+                            date_obj = parse_to_date_object(clean_formatted)
+                            if date_obj and is_within_last_30_days(date_obj):
+                                found_news.append({
+                                    "text": clean_formatted,
                                     "is_today": (date_obj == today_date_obj)
                                 })
                                 has_data = True
