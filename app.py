@@ -1257,17 +1257,7 @@ if hist_close is not None and not hist_close.empty:
     # ============================================================
     with tab2:
         st.markdown("### 📡 0050 領頭羊基本面預警衛星 v22.4")
-        st.markdown("""
-            <style>
-            [data-testid="stMetricLabel"] {
-                font-size: 13px !important;
-            }
-            [data-testid="stMetricValue"] {
-                font-size: 18px !important;
-                font-weight: bold !important;
-            }
-            </style>
-        """, unsafe_allow_html=True)
+
         
         active_tickers = active_stock_df['Ticker'].tolist()
         my_stocks_dynamic = [t.split('.')[0] for t in active_tickers if t != 'REALIZED_CASH']
@@ -1282,9 +1272,9 @@ if hist_close is not None and not hist_close.empty:
         
         # 將說明與監控標的資訊集中合併到同一個 HTML 框，使用自適應字體顏色變數 var(--text-color)
         st.markdown(f"""
-            <div style="background: rgba(128, 128, 128, 0.05); border: 1px solid rgba(128, 128, 128, 0.1); border-radius: 6px; padding: 12px; margin-bottom: 15px; margin-top: 10px;">
-                <span style="font-size: 13px; color: var(--text-color); opacity: 0.85; display: block; margin-bottom: 6px;">對接「公開資訊觀測站 (MOPS)」，自動掃描持股個股近 30 天重大訊息，今日即時重訊優先置頂顯示。</span>
-                <span style="font-size: 12px; color: var(--text-color); opacity: 0.65;">📋 <b>監控股票數</b>：{len(my_stocks_dynamic)} 檔 | 🔍 <b>掃描範圍</b>：近 30 天重大訊息 | 🌐 <b>資料來源</b>：MOPS 公開資訊觀測站</span>
+            <div style="background: rgba(128, 128, 128, 0.06); border: 1px solid rgba(128, 128, 128, 0.12); border-radius: 8px; padding: 15px; margin-bottom: 18px; margin-top: 10px; line-height: 1.6;">
+                <span style="font-size: 15px; color: var(--text-color); opacity: 0.9; display: block; margin-bottom: 8px; font-weight: 500;">對接「公開資訊觀測站 (MOPS)」，自動掃描持股個股近 30 天重大訊息，今日即時重訊優先置頂顯示。</span>
+                <span style="font-size: 13px; color: var(--text-color); opacity: 0.7;">📋 <b>監控股票數</b>：{len(my_stocks_dynamic)} 檔 | 🔍 <b>掃描範圍</b>：近 30 天重大訊息 | 🌐 <b>資料來源</b>：MOPS 公開資訊觀測站</span>
             </div>
         """, unsafe_allow_html=True)
         
