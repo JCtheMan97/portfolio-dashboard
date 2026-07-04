@@ -882,19 +882,20 @@ if hist_close is not None and not hist_close.empty:
         val_now_main += shs * latest_prices.get(tk, 0.0)
 
     for idx, row in st.session_state.loans_df.iterrows():
-        # Calculate days elapsed if Start_Date is present for auto interest calculation
+        # Calculate days elapsed if Start_Date is present for auto interest calculation (Installment only)
         start_date_str = str(row.get('Start_Date', ''))
         calculated_interest = float(row.get('Actual_Interest', 0.0))
-        try:
-            if start_date_str:
-                sd = datetime.strptime(start_date_str.strip(), '%Y-%m-%d').date()
-                days = (date.today() - sd).days
-                if days > 0:
-                    # Dynamically add daily interest accrued since Start_Date on top of the baseline!
-                    accrued = float(row['Principal']) * (float(row['Annual_Rate']) / 100.0) * (days / 365.0)
-                    calculated_interest += accrued
-        except Exception:
-            pass
+        # 只有分期還款 (Installment) 需要自動累計利息，隨借隨還 (LOC / Margin) 填入即為當下最新值
+        if str(row.get('Type', 'Installment')) == 'Installment':
+            try:
+                if start_date_str:
+                    sd = datetime.strptime(start_date_str.strip(), '%Y-%m-%d').date()
+                    days = (date.today() - sd).days
+                    if days > 0:
+                        accrued = float(row['Principal']) * (float(row['Annual_Rate']) / 100.0) * (days / 365.0)
+                        calculated_interest += accrued
+            except Exception:
+                pass
             
         # 直接使用使用者設定的目前維持率，不做基期縮放
         projected_ratio = float(row.get('Margin_Ratio_Baseline', 180.0))
@@ -1094,12 +1095,15 @@ if hist_close is not None and not hist_close.empty:
                     status_info = get_margin_status(m_ratio, c_thresh, r_thresh, l_thresh, h_record)
                     
                     level = status_info['level']
+                    avail_borrow = loan.get('available_to_borrow', 0.0)
+                    avail_str = f" | 💰 尚可借額度: NT$ {avail_borrow:,.0f}" if avail_borrow > 0.0 else ""
+                    
                     if level == 'safe':
-                        st.success(f"🟢 **{loan.get('label','股票質押')}** | 目前維持率: **{m_ratio:.1f}%** | {status_info['status']}")
+                        st.success(f"🟢 **{loan.get('label','股票質押')}** | 目前維持率: **{m_ratio:.1f}%** | {status_info['status']}{avail_str}")
                     elif level in ['warning_with_record', 'ok']:
-                        st.warning(f"🟡 **{loan.get('label','股票質押')}** | 目前維持率: **{m_ratio:.1f}%** | {status_info['status']}")
+                        st.warning(f"🟡 **{loan.get('label','股票質押')}** | 目前維持率: **{m_ratio:.1f}%** | {status_info['status']}{avail_str}")
                     else:
-                        st.error(f"🚨 **{loan.get('label','股票質押')}** | 目前維持率: **{m_ratio:.1f}%** | {status_info['status']}")
+                        st.error(f"🚨 **{loan.get('label','股票質押')}** | 目前維持率: **{m_ratio:.1f}%** | {status_info['status']}{avail_str}")
                     
                     if m_ratio is not None:
                         col_proj1, col_proj2 = st.columns(2)
