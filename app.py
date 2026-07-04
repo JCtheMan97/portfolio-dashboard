@@ -617,7 +617,7 @@ if not st.session_state.loans_df.empty:
             
             if new_margin:
                 new_ratio_base = st.number_input(
-                    "基期維持率 (%) (將隨持股漲跌自動縮放)",
+                    "維持率 (%)",
                     min_value=0.0,
                     step=0.1,
                     format="%.1f",
@@ -625,13 +625,11 @@ if not st.session_state.loans_df.empty:
                     key=f"l_ratio_base_{idx}"
                 )
                 
-                # Projected ratio scaled since Start_Date
-                val_start = get_portfolio_value_on_date(sc_hist, default_csv, new_start_date)
-                loan_scale = (val_now / val_start) if val_start > 0 else 1.0
-                projected_ratio = new_ratio_base * loan_scale
+                # 目前維持率直接採用輸入值
+                projected_ratio = new_ratio_base
                 
                 # Display projected live维持率 as subtext to inform user
-                st.caption(f"📈 估算目前維持率: **{projected_ratio:.1f}%** (隨市價自基期累計變動: {loan_scale:+.1%})")
+                st.caption(f"📈 目前維持率: **{projected_ratio:.1f}%**")
                 
                 # Auto calculate Available to Borrow if left 0
                 calc_avail = float(st.session_state[f"l_avail_{idx}"])
@@ -700,7 +698,7 @@ with st.sidebar.expander("➕ 新增貸款項目"):
     new_record = False
     
     if new_margin:
-        new_ratio = st.number_input("基期維持率 (%)", value=180.0, key="new_l_ratio")
+        new_ratio = st.number_input("維持率 (%)", value=180.0, key="new_l_ratio")
         new_avail = st.number_input("尚可借額度 (NT$) (留0則自動計算)", value=0.0, key="new_l_avail")
         new_call = st.number_input("追繳線 (%)", value=130.0, key="new_l_call")
         new_rec = st.number_input("解除線 (%)", value=166.0, key="new_l_rec")
@@ -898,11 +896,8 @@ if hist_close is not None and not hist_close.empty:
         except Exception:
             pass
             
-        # Calculate projected margin ratio based on cumulative price change since Start_Date
-        base_ratio = float(row.get('Margin_Ratio_Baseline', 180.0))
-        val_start = get_portfolio_value_on_date(hist_close, active_stock_df, start_date_str)
-        loan_scale = (val_now_main / val_start) if val_start > 0 else 1.0
-        projected_ratio = base_ratio * loan_scale
+        # 直接使用使用者設定的目前維持率，不做基期縮放
+        projected_ratio = float(row.get('Margin_Ratio_Baseline', 180.0))
         
         # Calculate projected available to borrow
         avail = float(row.get('Available_To_Borrow', 0.0))
@@ -1365,37 +1360,146 @@ if hist_close is not None and not hist_close.empty:
                         await asyncio.sleep(1.5)
                 return stock_code, []
 
+        def fetch_stock_news_requests_fallback(stock_code):
+            """免瀏覽器核心的 HTTP 輕量級重訊爬蟲 (當 Playwright 因系統庫缺失崩潰時自動降級備援使用)"""
+            today_date_obj = date.today()
+            current_tw_year_str = str(today_date_obj.year - 1911)
+            
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Referer": "https://mops.twse.com.tw/",
+                "Content-Type": "application/x-www-form-urlencoded",
+            }
+            
+            url = "https://mopsov.twse.com.tw/mops/web/t05st01"
+            post_data = {
+                "encodeURIComponent": "1",
+                "step": "1",
+                "firstin": "1",
+                "off": "1",
+                "keyword4": "",
+                "code1": "",
+                "TYPEK2": "",
+                "checkbtn": "",
+                "queryName": "co_id",
+                "inpuType": "co_id",
+                "TYPEK": "all",
+                "co_id": stock_code,
+            }
+            
+            found_news = []
+            try:
+                resp = requests.post(url, data=post_data, headers=headers, timeout=12)
+                if resp.status_code == 200:
+                    soup = BeautifulSoup(resp.text, "html.parser")
+                    tables = soup.find_all("table")
+                    for table in tables:
+                        rows = table.find_all("tr")
+                        for row in rows:
+                            cols = row.find_all("td")
+                            if len(cols) < 2:
+                                continue
+                            date_text = cols[0].get_text(strip=True)
+                            
+                            # 嚴格匹配 115/07/03 格式，且為當前民國年份
+                            if not re.match(r"^\d{2,3}/\d{1,2}/\d{1,2}$", date_text):
+                                continue
+                            if current_tw_year_str not in date_text:
+                                continue
+                            
+                            # 提取主旨，長度在 5 到 200 之間，排除雜訊選單文字
+                            title_text = ""
+                            for ci in [2, 1, 3]:
+                                if len(cols) > ci:
+                                    t = cols[ci].get_text(strip=True)
+                                    if 5 <= len(t) <= 200 and not any(kw in t for kw in ["基本資料", "電子書", "財務預測書", "財務報告書", "年報及股東會", "持股不足"]):
+                                        title_text = t
+                                        break
+                            
+                            if not title_text:
+                                continue
+                            
+                            full_line = f"{date_text}  {title_text}"
+                            date_obj = parse_to_date_object(date_text)
+                            if date_obj and is_within_last_30_days(date_obj):
+                                found_news.append({
+                                    "text": full_line,
+                                    "is_today": (date_obj == today_date_obj)
+                                })
+            except Exception:
+                pass
+            
+            seen = set()
+            unique_news = []
+            for item in found_news:
+                if item["text"] not in seen:
+                    seen.add(item["text"])
+                    unique_news.append(item)
+            return unique_news
+
         async def run_scraper(stocks_list, status_placeholder, progress_bar):
-            async with async_playwright() as p:
-                try:
-                    browser = await p.chromium.launch(headless=True)
-                except Exception as e:
-                    status_placeholder.info("⚙️ 偵測到雲端環境尚未安裝瀏覽器內核，正在自動下載安裝 Chromium 內核... (此步驟僅在首次執行時耗時約 30 秒，之後將自動快取)")
-                    import subprocess
+            use_playwright = True
+            browser = None
+            p = None
+            try:
+                # 嘗試啟動 Playwright 引擎
+                p = await async_playwright().start()
+                browser = await p.chromium.launch(headless=True)
+            except Exception as e:
+                use_playwright = False
+                status_placeholder.warning("⚠️ 偵測到雲端 Linux 無頭環境缺少 Chromium 系統庫，自動切換至備援 HTTP (requests) 輕量級重訊引擎...")
+                if p:
                     try:
-                        subprocess.run(["python", "-m", "playwright", "install", "chromium"])
-                    except Exception as install_err:
-                        status_placeholder.error(f"自動下載瀏覽器內核失敗: {install_err}")
-                        raise install_err
-                    browser = await p.chromium.launch(headless=True)
-                context = await browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                    viewport={"width": 1400, "height": 900}
-                )
-                semaphore = asyncio.Semaphore(3)
-                today_date_obj = date.today()
-                current_tw_year_str = str(today_date_obj.year - 1911)
-                tasks = [fetch_stock_news_worker(context, stock, semaphore, today_date_obj, current_tw_year_str) for stock in stocks_list]
-                results = []
-                total = len(tasks)
-                for i, coro in enumerate(asyncio.as_completed(tasks)):
-                    stock, news = await coro
+                        await p.stop()
+                    except:
+                        pass
+            
+            results = []
+            total = len(stocks_list)
+            
+            if use_playwright and browser:
+                try:
+                    context = await browser.new_context(
+                        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                        viewport={"width": 1400, "height": 900}
+                    )
+                    
+                    semaphore = asyncio.Semaphore(3)
+                    today_date_obj = date.today()
+                    current_tw_year_str = str(today_date_obj.year - 1911)
+                    
+                    tasks = [fetch_stock_news_worker(context, stock, semaphore, today_date_obj, current_tw_year_str) for stock in stocks_list]
+                    
+                    for i, coro in enumerate(asyncio.as_completed(tasks)):
+                        stock, news = await coro
+                        results.append((stock, news))
+                        percent = (i + 1) / total
+                        status_placeholder.write(f"⏳ **[Playwright 引擎]** 已完成掃描個股：{get_stock_name_by_code(stock)} ({stock}) (進度: {i+1}/{total})")
+                        progress_bar.progress(percent)
+                except Exception as run_err:
+                    # 執行期出錯也進入降級
+                    use_playwright = False
+                finally:
+                    try:
+                        await browser.close()
+                    except:
+                        pass
+                    try:
+                        await p.stop()
+                    except:
+                        pass
+            
+            # 若 Playwright 啟動或執行失敗，則用 Fallback 爬蟲抓取
+            if not use_playwright:
+                for i, stock in enumerate(stocks_list):
+                    news = fetch_stock_news_requests_fallback(stock)
                     results.append((stock, news))
                     percent = (i + 1) / total
-                    status_placeholder.write(f"⏳ **已完成掃描個股**：{get_stock_name_by_code(stock)} ({stock}) (進度: {i+1}/{total})")
+                    status_placeholder.write(f"⏳ **[HTTP 備援引擎]** 已完成掃描個股：{get_stock_name_by_code(stock)} ({stock}) (進度: {i+1}/{total})")
                     progress_bar.progress(percent)
-                await browser.close()
-                return results
+                    await asyncio.sleep(0.3)
+                    
+            return results
 
         def run_async(coro):
             try:
