@@ -595,7 +595,8 @@ if not st.session_state.loans_df.empty:
                 key=f"l_r_{idx}"
             )
             
-            new_interest = st.number_input("基期利息 (NT$)", min_value=0.0, step=1000.0, value=float(st.session_state[f"l_i_{idx}"]), key=f"l_i_{idx}")
+            # 累積利息輸入 (適用於信貸及隨借隨還，皆會隨時間自動累計)
+            new_interest = st.number_input("累積利息 (NT$)", min_value=0.0, step=1000.0, value=float(st.session_state[f"l_i_{idx}"]), key=f"l_i_{idx}")
             new_margin = st.checkbox("為股票質押維持率貸款", value=bool(st.session_state[f"l_margin_{idx}"]), key=f"l_margin_{idx}")
             
             # Start Date input field in the sidebar!
@@ -613,7 +614,7 @@ if not st.session_state.loans_df.empty:
             except Exception:
                 pass
             est_total_interest = new_interest + interest_added
-            st.caption(f"💡 預估目前累計總利息: **NT$ {est_total_interest:,.0f}** (基期 NT$ {new_interest:,.0f} + 累加 {days_elapsed} 天利息)")
+            st.caption(f"💡 目前累算總利息: **NT$ {est_total_interest:,.0f}** (已產生 NT$ {new_interest:,.0f} + 累計 {days_elapsed} 天利息)")
             
             if new_margin:
                 new_ratio_base = st.number_input(
@@ -687,7 +688,8 @@ with st.sidebar.expander("➕ 新增貸款項目"):
     new_label = st.text_input("項目名稱", value="新融資項目", key="new_l_label")
     new_principal = st.number_input("融資額/本金 (NT$)", value=500000.0, step=50000.0, key="new_l_p")
     new_rate = st.number_input("年化利率 (%)", min_value=0.0, max_value=30.0, value=2.50, step=0.01, format="%.2f", key="new_l_r")
-    new_interest = st.number_input("累計利息 (NT$)", value=0.0, key="new_l_i")
+    # 新增貸款時統一命名為累積利息 (適用信貸與隨借隨還按日計息)
+    new_interest = st.number_input("累積利息 (NT$)", value=0.0, key="new_l_i")
     new_margin = st.checkbox("此為股票维持率質押貸款", value=False, key="new_l_margin")
     
     new_ratio = 180.0
@@ -882,20 +884,18 @@ if hist_close is not None and not hist_close.empty:
         val_now_main += shs * latest_prices.get(tk, 0.0)
 
     for idx, row in st.session_state.loans_df.iterrows():
-        # Calculate days elapsed if Start_Date is present for auto interest calculation (Installment only)
+        # Calculate days elapsed if Start_Date is present for auto interest calculation (All types accrue daily)
         start_date_str = str(row.get('Start_Date', ''))
         calculated_interest = float(row.get('Actual_Interest', 0.0))
-        # 只有分期還款 (Installment) 需要自動累計利息，隨借隨還 (LOC / Margin) 填入即為當下最新值
-        if str(row.get('Type', 'Installment')) == 'Installment':
-            try:
-                if start_date_str:
-                    sd = datetime.strptime(start_date_str.strip(), '%Y-%m-%d').date()
-                    days = (date.today() - sd).days
-                    if days > 0:
-                        accrued = float(row['Principal']) * (float(row['Annual_Rate']) / 100.0) * (days / 365.0)
-                        calculated_interest += accrued
-            except Exception:
-                pass
+        try:
+            if start_date_str:
+                sd = datetime.strptime(start_date_str.strip(), '%Y-%m-%d').date()
+                days = (date.today() - sd).days
+                if days > 0:
+                    accrued = float(row['Principal']) * (float(row['Annual_Rate']) / 100.0) * (days / 365.0)
+                    calculated_interest += accrued
+        except Exception:
+            pass
             
         # 直接使用使用者設定的目前維持率，不做基期縮放
         projected_ratio = float(row.get('Margin_Ratio_Baseline', 180.0))
