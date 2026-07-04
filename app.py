@@ -1280,11 +1280,11 @@ if hist_close is not None and not hist_close.empty:
 
         monitor_list_display = [f"{get_stock_name_by_code(s)} ({s})" for s in my_stocks_dynamic]
         
-        # 將說明與監控標的資訊集中合併到同一個 HTML 框，移除 st.markdown("---") 以消除多餘空白與橫線
+        # 將說明與監控標的資訊集中合併到同一個 HTML 框，使用自適應字體顏色變數 var(--text-color)
         st.markdown(f"""
-            <div style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05); border-radius: 6px; padding: 12px; margin-bottom: 15px; margin-top: 10px;">
-                <span style="font-size: 13px; color: #aaaaaa; display: block; margin-bottom: 6px;">對接「公開資訊觀測站 (MOPS)」，自動掃描持股個股近 30 天重大訊息，今日即時重訊優先置頂顯示。</span>
-                <span style="font-size: 12px; color: #888888;">📋 <b>監控股票數</b>：{len(my_stocks_dynamic)} 檔 | 🔍 <b>掃描範圍</b>：近 30 天重大訊息 | 🌐 <b>資料來源</b>：MOPS 公開資訊觀測站</span>
+            <div style="background: rgba(128, 128, 128, 0.05); border: 1px solid rgba(128, 128, 128, 0.1); border-radius: 6px; padding: 12px; margin-bottom: 15px; margin-top: 10px;">
+                <span style="font-size: 13px; color: var(--text-color); opacity: 0.85; display: block; margin-bottom: 6px;">對接「公開資訊觀測站 (MOPS)」，自動掃描持股個股近 30 天重大訊息，今日即時重訊優先置頂顯示。</span>
+                <span style="font-size: 12px; color: var(--text-color); opacity: 0.65;">📋 <b>監控股票數</b>：{len(my_stocks_dynamic)} 檔 | 🔍 <b>掃描範圍</b>：近 30 天重大訊息 | 🌐 <b>資料來源</b>：MOPS 公開資訊觀測站</span>
             </div>
         """, unsafe_allow_html=True)
         
@@ -1611,13 +1611,13 @@ if hist_close is not None and not hist_close.empty:
                 # 🚀 3. 高級儀表板卡片 (與第一分頁相同風格，透明無黑底)
                 st.markdown(f"""
                     <div style="display: flex; gap: 15px; margin-bottom: 20px; margin-top: 10px;">
-                        <div style="flex: 1; background: rgba(255, 255, 255, 0.05); border-radius: 8px; padding: 15px; border: 1px solid rgba(255, 255, 255, 0.1); box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
-                            <span style="font-size: 13px; color: #888888; font-weight: 500;">📋 近 30 天重要訊息總數</span><br>
+                        <div style="flex: 1; background: rgba(128, 128, 128, 0.06); border-radius: 8px; padding: 15px; border: 1px solid rgba(128, 128, 128, 0.12); box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
+                            <span style="font-size: 13px; color: var(--text-color); opacity: 0.75; font-weight: 500;">📋 近 30 天重要訊息總數</span><br>
                             <span style="font-size: 26px; font-weight: bold; color: #ff4b4b;">{total_alerts} 筆</span>
                             <span style="font-size: 12px; margin-left: 8px; color: {'#ff4b4b' if total_alerts > 0 else '#00cc66'}">{'🔴 警告' if total_alerts > 0 else '🟢 安全'}</span>
                         </div>
-                        <div style="flex: 1; background: rgba(255, 255, 255, 0.05); border-radius: 8px; padding: 15px; border: 1px solid rgba(255, 255, 255, 0.1); box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
-                            <span style="font-size: 13px; color: #888888; font-weight: 500;">🔥 今日最新即時發布</span><br>
+                        <div style="flex: 1; background: rgba(128, 128, 128, 0.06); border-radius: 8px; padding: 15px; border: 1px solid rgba(128, 128, 128, 0.12); box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
+                            <span style="font-size: 13px; color: var(--text-color); opacity: 0.75; font-weight: 500;">🔥 今日最新即時發布</span><br>
                             <span style="font-size: 26px; font-weight: bold; color: #ffaa00;">{today_alerts} 筆</span>
                             <span style="font-size: 12px; margin-left: 8px; color: {'#ffaa00' if today_alerts > 0 else '#888888'}">{'🔥 今日' if today_alerts > 0 else '無今日發布'}</span>
                         </div>
@@ -1653,21 +1653,21 @@ if hist_close is not None and not hist_close.empty:
                             for news_item in news_list_sorted:
                                 if news_item["is_today"]:
                                     st.markdown(f"""
-                                        <div style="padding: 12px; margin-bottom: 8px; background: rgba(255, 75, 75, 0.06); border-left: 4px solid #ff4b4b; border-radius: 6px; border: 1px solid rgba(255, 75, 75, 0.15);">
-                                            <span style="color: #ff4b4b; font-weight: bold; font-size: 13px; margin-right: 8px;">🔥【今日即時】</span>
-                                            <span style="color: #ffffff; font-size: 14px; font-family: sans-serif;">{news_item['text']}</span>
+                                        <div style="padding: 12px; margin-bottom: 8px; background: rgba(255, 75, 75, 0.05); border-left: 4px solid #d9383a; border-radius: 6px; border: 1px solid rgba(255, 75, 75, 0.15);">
+                                            <span style="color: #d9383a; font-weight: bold; font-size: 13px; margin-right: 8px;">🔥【今日即時】</span>
+                                            <span style="color: var(--text-color); font-size: 14px; font-family: sans-serif; font-weight: 500;">{news_item['text']}</span>
                                         </div>
                                     """, unsafe_allow_html=True)
                                 else:
                                     st.markdown(f"""
-                                        <div style="padding: 12px; margin-bottom: 8px; background: rgba(255, 255, 255, 0.02); border-left: 4px solid #ffd166; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.05);">
-                                            <span style="color: #ffd166; font-weight: bold; font-size: 13px; margin-right: 8px;">• 歷史重訊</span>
-                                            <span style="color: #e0e0e0; font-size: 14px; font-family: sans-serif;">{news_item['text']}</span>
+                                        <div style="padding: 12px; margin-bottom: 8px; background: rgba(128, 128, 128, 0.03); border-left: 4px solid #b58900; border-radius: 6px; border: 1px solid rgba(128, 128, 128, 0.08);">
+                                            <span style="color: #b58900; font-weight: bold; font-size: 13px; margin-right: 8px;">• 歷史重訊</span>
+                                            <span style="color: var(--text-color); font-size: 14px; font-family: sans-serif;">{news_item['text']}</span>
                                         </div>
                                     """, unsafe_allow_html=True)
                 
                 if clean_stocks:
-                    clean_displays_html = "".join([f"<span style='display: inline-block; background: rgba(0, 204, 102, 0.08); color: #00cc66; border: 1px solid rgba(0, 204, 102, 0.2); border-radius: 20px; padding: 4px 12px; margin: 4px; font-size: 13px;'>✅ {get_stock_name_by_code(s)} ({s})</span>" for s in clean_stocks])
+                    clean_displays_html = "".join([f"<span style='display: inline-block; background: rgba(0, 204, 102, 0.08); color: #00994d; border: 1px solid rgba(0, 204, 102, 0.2); border-radius: 20px; padding: 4px 12px; margin: 4px; font-size: 13px; font-weight: 500;'>✅ {get_stock_name_by_code(s)} ({s})</span>" for s in clean_stocks])
                     with st.expander(f"✅ 近一個月內無重訊個股 (共 {len(clean_stocks)} 檔)", expanded=False):
                         st.markdown(f"""
                             <div style="padding: 10px; background: rgba(255,255,255,0.01); border-radius: 8px; border: 1px dashed rgba(255,255,255,0.05); display: flex; flex-wrap: wrap;">
