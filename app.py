@@ -1267,7 +1267,7 @@ if hist_close is not None and not hist_close.empty:
                 font-weight: bold !important;
             }
             </style>
-        """, unsafe_allow_code=True)
+        """, unsafe_allow_html=True)
         st.caption("對接「公開資訊觀測站 (MOPS)」，自動掃描持股個股近 30 天重大訊息，今日即時重訊優先置頂顯示。")
         st.markdown("---")
         
