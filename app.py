@@ -7,10 +7,16 @@ from datetime import datetime, timedelta, date
 import os
 import html
 import warnings
-import asyncio
 import re
 import threading
-from playwright.async_api import async_playwright
+try:
+    import zoneinfo
+    TW_TZ = zoneinfo.ZoneInfo("Asia/Taipei")
+except ImportError:
+    from datetime import timezone
+    TW_TZ = timezone(timedelta(hours=8))
+import requests
+from bs4 import BeautifulSoup
 
 warnings.filterwarnings('ignore')
 
@@ -290,9 +296,10 @@ col_title_left, col_title_right = st.columns([3, 1])
 with col_title_left:
     st.markdown("<h2 style='margin-top: -30px; font-weight: 800;'>📊 JC投資組合前瞻性壓力測試與風險監控</h2>", unsafe_allow_html=True)
 with col_title_right:
+    now_tw = datetime.now(TW_TZ)
     st.markdown(
         f"<div style='text-align: right; margin-top: -15px; font-weight: bold; font-size:14px;'>"
-        f"報告時間: <span style='font-size:12px; font-weight:normal;'>{datetime.now().strftime('%Y-%m-%d %H:%M')}</span>"
+        f"報告時間: <span style='font-size:12px; font-weight:normal;'>{now_tw.strftime('%Y-%m-%d %H:%M')} (台灣時間)</span>"
         f"</div>", 
         unsafe_allow_html=True
     )
@@ -403,7 +410,17 @@ if 'prev_scenario_id' not in st.session_state:
         st.session_state.prev_scenario_id = 2 # Default to Scenario 3
 
 if 'current_cash' not in st.session_state:
-    st.session_state.current_cash = 0.0
+    import json
+    _cfg_path = os.path.join(os.path.dirname(__file__), 'app_config.json')
+    try:
+        if os.path.exists(_cfg_path):
+            with open(_cfg_path, 'r', encoding='utf-8') as f:
+                _cfg = json.load(f)
+            st.session_state.current_cash = float(_cfg.get('current_cash', 0.0))
+        else:
+            st.session_state.current_cash = 0.0
+    except Exception:
+        st.session_state.current_cash = 0.0
 
 chosen_scenario_id = st.sidebar.selectbox(
     "選擇資產情境模式 (載入後可於下方直接修改)",
@@ -472,12 +489,31 @@ if chosen_scenario_id != st.session_state.prev_scenario_id:
 
 # Sidebar editable parameters
 st.sidebar.markdown("### 💵 現金調整")
-st.session_state.current_cash = st.sidebar.number_input(
+_cash_input = st.sidebar.number_input(
     "手邊持有閒置現金 (NT$)",
     value=float(st.session_state.current_cash),
     step=10000.0,
-    format="%.2f"
+    format="%.2f",
+    key="cash_input_widget"
 )
+if _cash_input != st.session_state.current_cash:
+    st.session_state.current_cash = _cash_input
+if st.sidebar.button("💾 保存現金設定", key="save_cash_btn"):
+    # Persist to a small config JSON next to the CSV files
+    import json
+    _cfg_path = os.path.join(os.path.dirname(__file__), 'app_config.json')
+    try:
+        cfg = {}
+        if os.path.exists(_cfg_path):
+            with open(_cfg_path, 'r', encoding='utf-8') as f:
+                cfg = json.load(f)
+        cfg['current_cash'] = _cash_input
+        with open(_cfg_path, 'w', encoding='utf-8') as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        st.session_state.current_cash = _cash_input
+        st.sidebar.success("現金設定已保存！")
+    except Exception as e:
+        st.sidebar.error(f"保存失敗: {e}")
 
 # We load active_stock_df here briefly to calculate price ratios for auto-margin updates
 default_csv = pd.read_csv(CSV_FILE_PATH) if os.path.exists(CSV_FILE_PATH) else pd.DataFrame()
@@ -1259,145 +1295,63 @@ if hist_close is not None and not hist_close.empty:
             delta_days = (today - target_date).days
             return 0 <= delta_days <= 30
 
-        async def fetch_stock_news_worker(context, stock_code, semaphore):
-            async with semaphore:
-                today_date_obj = date.today()
-                current_tw_year_str = str(today_date_obj.year - 1911)
-                
-                urls = [
-                    f"https://mops.twse.com.tw/mops/#/web/t146sb05?companyId={stock_code}",
-                    f"https://mops.twse.com.tw/mops/#/web/t146sb05?companyId={stock_code}",
-                    f"https://mopsov.twse.com.tw/mops/web/t146sb05?companyId={stock_code}"
-                ]
-                
-                max_retries = len(urls)
-                
-                for attempt in range(1, max_retries + 1):
-                    target_url = urls[attempt - 1]
-                    is_backup_site = "mopsov" in target_url
-                    
-                    found_news = []
-                    page = await context.new_page()
-                    try:
-                        await page.goto(target_url, wait_until="domcontentloaded", timeout=25000)
-                        
-                        try:
-                            await page.wait_for_function(f"""
-                                () => {{
-                                    const tableText = document.querySelector('.el-table, table')?.innerText || '';
-                                    return tableText.includes('{current_tw_year_str}/') || tableText.includes('暫無數據') || tableText.includes('無資料');
-                                }}
-                            """, timeout=6000)
-                        except:
-                            pass
-                            
-                        await page.wait_for_timeout(450)
-                        
-                        page_text = await page.evaluate("() => document.body.innerText")
-                        lines = page_text.split('\n')
-                        
-                        has_valid_table_data = any(f"{current_tw_year_str}/" in line or "暫無數據" in line or "無資料" in line for line in lines)
-                        
-                        if not has_valid_table_data and attempt < max_retries:
-                            await page.close()
-                            await asyncio.sleep(0.8 * attempt)
-                            continue
-                        
-                        for line in lines:
-                            clean_line = line.strip()
-                            if not clean_line or "詳細資料" in clean_line or "主旨" in clean_line:
-                                continue
-                            if f"{current_tw_year_str}/" in clean_line and len(clean_line) > 10:
-                                if "請輸入" in clean_line or "公司代碼" in clean_line or "歷史查詢" in clean_line:
-                                    continue
-                                
-                                date_obj = parse_to_date_object(clean_line)
+        def fetch_stock_news_requests(stock_code):
+            """Fetch MOPS news for a single stock using requests (no browser needed)."""
+            today_date_obj = date.today()
+            current_tw_year_str = str(today_date_obj.year - 1911)
+            
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Referer": "https://mops.twse.com.tw/",
+                "Content-Type": "application/x-www-form-urlencoded",
+            }
+            
+            # Use MOPS old-site API which returns parseable HTML (not SPA)
+            urls = [
+                f"https://mopsov.twse.com.tw/mops/web/t146sb05",
+                f"https://mops.twse.com.tw/mops/web/t146sb05",
+            ]
+            post_data = {
+                "encodeURIComponent": "1",
+                "step": "1",
+                "firstin": "1",
+                "co_id": stock_code,
+                "TYPEK": "all",
+            }
+            
+            found_news = []
+            for url in urls:
+                try:
+                    resp = requests.post(url, data=post_data, headers=headers, timeout=12)
+                    if resp.status_code != 200:
+                        continue
+                    soup = BeautifulSoup(resp.text, "html.parser")
+                    rows = soup.select("table tr")
+                    for row in rows:
+                        cols = row.find_all("td")
+                        if len(cols) >= 3:
+                            date_text = cols[0].get_text(strip=True)
+                            title_text = cols[2].get_text(strip=True) if len(cols) > 2 else cols[1].get_text(strip=True)
+                            if f"{current_tw_year_str}/" in date_text and len(title_text) > 3:
+                                full_line = f"{date_text} {title_text}"
+                                date_obj = parse_to_date_object(date_text)
                                 if date_obj and is_within_last_30_days(date_obj):
                                     found_news.append({
-                                        "text": clean_line,
+                                        "text": full_line,
                                         "is_today": (date_obj == today_date_obj)
                                     })
-                                    
-                        await page.close()
-                        
-                        seen = set()
-                        unique_news = []
-                        for item in found_news:
-                            if item["text"] not in seen:
-                                seen.add(item["text"])
-                                unique_news.append(item)
-                        return stock_code, unique_news
-
-                    except Exception:
-                        await page.close()
-                        if attempt == max_retries:
-                            return stock_code, []
-                        await asyncio.sleep(1.5)
-                        
-                return stock_code, []
-
-        async def run_scraper(stocks_list, status_placeholder, progress_bar):
-            async with async_playwright() as p:
-                try:
-                    browser = await p.chromium.launch(headless=True)
-                except Exception as e:
-                    status_placeholder.info("⚙️ 偵測到雲端環境尚未安裝瀏覽器內核，正在自動下載安裝 Chromium 內核... (此步驟僅在首次執行時耗時約 30 秒，之後將自動快取)")
-                    import subprocess
-                    try:
-                        subprocess.run(["playwright", "install", "chromium"])
-                    except Exception as install_err:
-                        status_placeholder.error(f"自動下載瀏覽器內核失敗: {install_err}")
-                        raise install_err
-                    # Retry launching after installation
-                    browser = await p.chromium.launch(headless=True)
-                    
-                context = await browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                    viewport={"width": 1400, "height": 900}
-                )
-                
-                semaphore = asyncio.Semaphore(3)
-                tasks = [fetch_stock_news_worker(context, stock, semaphore) for stock in stocks_list]
-                
-                results = []
-                total = len(tasks)
-                for i, coro in enumerate(asyncio.as_completed(tasks)):
-                    stock, news = await coro
-                    results.append((stock, news))
-                    percent = (i + 1) / total
-                    status_placeholder.write(f"⏳ **已完成掃描個股**：{get_stock_name_by_code(stock)} ({stock}) (進度: {i+1}/{total})")
-                    progress_bar.progress(percent)
-                    
-                await browser.close()
-                return results
-
-        def run_async(coro):
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                
-            if loop.is_running():
-                result = [None]
-                exception = [None]
-                def worker():
-                    try:
-                        new_loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(new_loop)
-                        result[0] = new_loop.run_until_complete(coro)
-                    except Exception as e:
-                        exception[0] = e
-                    finally:
-                        new_loop.close()
-                t = threading.Thread(target=worker)
-                t.start()
-                t.join()
-                if exception[0]:
-                    raise exception[0]
-                return result[0]
-            else:
-                return loop.run_until_complete(coro)
+                    if found_news:
+                        break
+                except Exception:
+                    continue
+            
+            seen = set()
+            unique_news = []
+            for item in found_news:
+                if item["text"] not in seen:
+                    seen.add(item["text"])
+                    unique_news.append(item)
+            return stock_code, unique_news
 
         if st.button("📡 啟動即時公開資訊觀測站重訊掃描"):
             if not my_stocks_dynamic:
@@ -1406,8 +1360,15 @@ if hist_close is not None and not hist_close.empty:
                 status_placeholder = st.empty()
                 progress_bar = st.progress(0.0)
                 
-                with st.spinner("⚡ 正在並行發動非同步陣列爬蟲，全速觀測中..."):
-                    results = run_async(run_scraper(my_stocks_dynamic, status_placeholder, progress_bar))
+                with st.spinner("⚡ 正在掃描公開資訊觀測站重訊，請稍候..."):
+                    results = []
+                    total = len(my_stocks_dynamic)
+                    for i, stock_code in enumerate(my_stocks_dynamic):
+                        stock_code, news = fetch_stock_news_requests(stock_code)
+                        results.append((stock_code, news))
+                        percent = (i + 1) / total
+                        status_placeholder.write(f"⏳ **已完成掃描個股**：{get_stock_name_by_code(stock_code)} ({stock_code}) (進度: {i+1}/{total})")
+                        progress_bar.progress(percent)
                 
                 progress_bar.empty()
                 status_placeholder.empty()
