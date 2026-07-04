@@ -1263,8 +1263,21 @@ if hist_close is not None and not hist_close.empty:
     # Tab 2: Live MOPS Alerts Scraper Integration
     # ============================================================
     with tab2:
-        st.markdown("### 📡 0050 領頭羊基本面預警衛星 v22.4 【工業級雙軌備援・新舊站自動降級版】")
-        st.write("本工兵對接「公開資訊觀測站(MOPS)」，具備新舊雙站自動重試與爬取功能，防堵網站阻斷風控。")
+        st.markdown("""
+        <div style='background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%); 
+                    padding: 24px 28px; border-radius: 16px; margin-bottom: 20px;
+                    border: 1px solid rgba(99,179,237,0.2);'>
+            <h2 style='color:#63b3ed; margin:0 0 8px 0; font-size:22px; font-weight:800;'>
+                📡 0050 領頭羊基本面預警衛星 v22.4
+            </h2>
+            <p style='color:#a0aec0; margin:0 0 6px 0; font-size:14px;'>
+                【工業級雙軌備援・全雲端相容版】本工兵對接「公開資訊觀測站 (MOPS)」，以輕量化 HTTP 引擎精準抓取重大訊息，完整相容 Streamlit Cloud 雲端環境。
+            </p>
+            <p style='color:#718096; margin:0; font-size:12px;'>
+                ⚡ 引擎：requests + BeautifulSoup ・ 🔒 無需瀏覽器核心 ・ ☁️ 完整雲端相容 ・ 📊 即時解析 MOPS 公開資料表
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
         
         active_tickers = active_stock_df['Ticker'].tolist()
         my_stocks_dynamic = [t.split('.')[0] for t in active_tickers if t != 'REALIZED_CASH']
@@ -1276,7 +1289,17 @@ if hist_close is not None and not hist_close.empty:
             return "未知個股"
 
         monitor_list_display = [f"{get_stock_name_by_code(s)} ({s})" for s in my_stocks_dynamic]
-        st.write(f"📋 **目前監控個股代碼 (共 {len(my_stocks_dynamic)} 檔)：** `{', '.join(monitor_list_display)}`")
+        
+        col_info1, col_info2, col_info3 = st.columns(3)
+        with col_info1:
+            st.metric("📋 監控股票數", f"{len(my_stocks_dynamic)} 檔")
+        with col_info2:
+            st.metric("🔍 掃描範圍", "近 30 天重大訊息")
+        with col_info3:
+            st.metric("🌐 資料來源", "MOPS 公開資訊觀測站")
+        
+        with st.expander(f"📋 展開查看目前監控個股清單 (共 {len(my_stocks_dynamic)} 檔)", expanded=False):
+            st.write(f"`{', '.join(monitor_list_display)}`")
         
         def parse_to_date_object(date_str):
             try:
