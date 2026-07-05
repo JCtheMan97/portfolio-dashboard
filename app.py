@@ -1141,14 +1141,7 @@ if hist_close is not None and not hist_close.empty:
     warning_cushion_weight = active_stock_df[(active_stock_df['Unrealized_ROI(%)'] >= 0) & (active_stock_df['Unrealized_ROI(%)'] < 10)]['Weight(%)'].sum()
     danger_cushion_weight = active_stock_df[active_stock_df['Unrealized_ROI(%)'] < 0]['Weight(%)'].sum()
 
-    # ============================================================
-    # 四大象限判定邏輯演算
-    # ============================================================
-    # 計算大盤恐慌日
-    index_returns = hist_close["^TWII"].pct_change() * 100
-    panic_dates = index_returns[index_returns <= -1.0].index.tolist()
-    total_panic_days = len(panic_dates)
-    dynamic_threshold = 55.0 if total_panic_days <= 5 else (70.0 if total_panic_days <= 15 else 80.0)
+    # 四大象限判定邏輯演算已重構，由危機模式 Beta 壓力測試取代
 
     # ============================================================
     # Tabs Setup
