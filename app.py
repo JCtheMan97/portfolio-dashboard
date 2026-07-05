@@ -83,10 +83,10 @@ def track_weekly_assets(total_assets, total_liability, stock_value, net_equity):
     }
     
     if not os.path.exists(ASSET_HISTORY_FILE_PATH):
-        d4 = (date.today() - timedelta(days=28)).isoformat()
-        d3 = (date.today() - timedelta(days=21)).isoformat()
-        d2 = (date.today() - timedelta(days=14)).isoformat()
-        d1 = (date.today() - timedelta(days=7)).isoformat()
+        d4 = (date.today() - timedelta(days=28)).isoformat() + " (預估)"
+        d3 = (date.today() - timedelta(days=21)).isoformat() + " (預估)"
+        d2 = (date.today() - timedelta(days=14)).isoformat() + " (預估)"
+        d1 = (date.today() - timedelta(days=7)).isoformat() + " (預估)"
         
         demo_data = pd.DataFrame([
             {"Date": d4, "Total_Assets": round(total_assets * 0.92), "Total_Liability": round(total_liability), "Stock_Value": round(stock_value * 0.90), "Net_Equity": round(net_equity * 0.93)},
@@ -106,7 +106,9 @@ def track_weekly_assets(total_assets, total_liability, stock_value, net_equity):
             return df
             
         last_date_str = str(df.iloc[-1]['Date'])
-        last_date = datetime.strptime(last_date_str, '%Y-%m-%d').date()
+        # 🚀 支援帶有 " (預估)" 尾綴的歷史日期，以空格分割取出 YYYY-MM-DD 純日期部分
+        pure_date_str = last_date_str.split()[0]
+        last_date = datetime.strptime(pure_date_str, '%Y-%m-%d').date()
         
         days_diff = (date.today() - last_date).days
         if days_diff >= 7:
@@ -126,7 +128,7 @@ def track_weekly_assets(total_assets, total_liability, stock_value, net_equity):
 # Custom CSS disabled to let Streamlit style sidebar and layout automatically based on system theme.
 
 CSV_FILE_PATH = os.path.join(os.path.dirname(__file__), 'portfolio_data.csv')
-# HISTORY_FILE_PATH removed
+# CSV Paths & Refactored DB configs
 LOANS_FILE_PATH = os.path.join(os.path.dirname(__file__), 'loans_data.csv')
 
 # ============================================================
