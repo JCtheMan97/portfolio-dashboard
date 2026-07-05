@@ -1124,49 +1124,50 @@ if hist_close is not None and not hist_close.empty:
         # 【第一部分：現有持股明細】(Chart on Left, styled table on Right)
         # ------------------------------------------------------------
         st.markdown("### 📋 【第一部分：現有持股明細】")
-        # 繪製本週漲跌最多卡片 (毛玻璃金融微光風格，支援多檔展示與 Fallback 兜底)
+        # 繪製本週漲跌最多卡片 (100% 寬度長方形橫向 Pills 字卡，完美自適應空間)
         if display_gainers or display_losers:
-            gainer_loser_html = "<div style='display: flex; gap: 12px; margin-bottom: 15px; align-items: flex-start;'>"
+            gainer_loser_html = ""
             
-            # 領漲區
+            # 領漲區 (寬度 100%)
             if display_gainers:
                 title_g = "📈 本週漲幅 10% 以上標的" if any(r['Weekly_Return(%)'] >= 10.0 for r in display_gainers) else "📈 本週持股領漲標的"
                 items_g_html = ""
                 for r in display_gainers:
                     items_g_html += f'''
-                    <div style="margin-top: 6px; display: flex; justify-content: space-between;">
-                        <span style="font-size: 15px; font-weight: bold; color: #00cc66;">{r['股票名稱']} ({r['Ticker'].split('.')[0]})</span>
-                        <span style="font-size: 15px; font-weight: bold; color: #00cc66;">+{r['Weekly_Return(%)']:.2f}%</span>
-                    </div>'''
+                    <span style="display: inline-block; background: rgba(0, 204, 102, 0.08); color: #00cc66; border: 1px solid rgba(0, 204, 102, 0.2); border-radius: 4px; padding: 4px 10px; margin: 4px; font-size: 14px; font-weight: bold;">
+                        {r['股票名稱']} ({r['Ticker'].split('.')[0]}) +{r['Weekly_Return(%)']:.2f}%
+                    </span>'''
                 gainer_loser_html += f"""
-                <div style="flex: 1; background: rgba(0, 204, 102, 0.05); border: 1px solid rgba(0, 204, 102, 0.15); border-radius: 8px; padding: 12px; border-left: 4px solid #00cc66;">
-                    <span style="font-size: 12px; color: var(--text-color); opacity: 0.7; font-weight: 600;">{title_g}</span>
-                    {items_g_html}
+                <div style="width: 100%; background: rgba(0, 204, 102, 0.04); border: 1px solid rgba(0, 204, 102, 0.12); border-radius: 8px; padding: 12px; border-left: 4px solid #00cc66; margin-bottom: 12px;">
+                    <span style="font-size: 12px; color: var(--text-color); opacity: 0.7; font-weight: 600; display: block; margin-bottom: 6px;">{title_g}</span>
+                    <div style="display: flex; flex-wrap: wrap; gap: 4px;">
+                        {items_g_html}
+                    </div>
                 </div>
                 """
             
-            # 領跌區
+            # 領跌區 (寬度 100%)
             if display_losers:
                 title_l = "📉 本週跌幅 10% 以上標的" if any(r['Weekly_Return(%)'] <= -10.0 for r in display_losers) else "📉 本週持股領跌標的"
                 items_l_html = ""
                 for r in display_losers:
                     items_l_html += f'''
-                    <div style="margin-top: 6px; display: flex; justify-content: space-between;">
-                        <span style="font-size: 15px; font-weight: bold; color: #ff4b4b;">{r['股票名稱']} ({r['Ticker'].split('.')[0]})</span>
-                        <span style="font-size: 15px; font-weight: bold; color: #ff4b4b;">{r['Weekly_Return(%)']:.2f}%</span>
-                    </div>'''
+                    <span style="display: inline-block; background: rgba(255, 75, 75, 0.08); color: #ff4b4b; border: 1px solid rgba(255, 75, 75, 0.2); border-radius: 4px; padding: 4px 10px; margin: 4px; font-size: 14px; font-weight: bold;">
+                        {r['股票名稱']} ({r['Ticker'].split('.')[0]}) {r['Weekly_Return(%)']:.2f}%
+                    </span>'''
                 gainer_loser_html += f"""
-                <div style="flex: 1; background: rgba(255, 75, 75, 0.05); border: 1px solid rgba(255, 75, 75, 0.15); border-radius: 8px; padding: 12px; border-left: 4px solid #ff4b4b;">
-                    <span style="font-size: 12px; color: var(--text-color); opacity: 0.7; font-weight: 600;">{title_l}</span>
-                    {items_l_html}
+                <div style="width: 100%; background: rgba(255, 75, 75, 0.04); border: 1px solid rgba(255, 75, 75, 0.12); border-radius: 8px; padding: 12px; border-left: 4px solid #ff4b4b; margin-bottom: 15px;">
+                    <span style="font-size: 12px; color: var(--text-color); opacity: 0.7; font-weight: 600; display: block; margin-bottom: 6px;">{title_l}</span>
+                    <div style="display: flex; flex-wrap: wrap; gap: 4px;">
+                        {items_l_html}
+                    </div>
                 </div>
                 """
                 
-            gainer_loser_html += "</div>"
-            # 🚀 壓縮 HTML，清除所有行首前導縮排與換行，完美防止 Markdown 將其誤判為 Code Block！
+            # 壓縮 HTML，清除所有行首前導縮排與換行，完美防止 Markdown 將其誤判為 Code Block！
             compact_html = "".join([line.strip() for line in gainer_loser_html.split('\n')])
             st.markdown(compact_html, unsafe_allow_html=True)
-
+            
         table_df = active_stock_df.sort_values(by='Weight(%)', ascending=False).copy()
         
         col_chart, col_table = st.columns([1, 2])
@@ -1423,56 +1424,57 @@ if hist_close is not None and not hist_close.empty:
             liability_w = hist_df['Total_Liability'] / 10000
             
             fig_trend = go.Figure()
-            fig_trend.add_trace(go.Scatter(
+            fig_trend.add_trace(go.Bar(
                 x=hist_df['Date'], y=assets_w, 
                 name='總資產 (Total Assets)', 
-                mode='lines+markers+text',
+                marker_color='#38bdf8',
                 text=[f"{val:.0f}萬" for val in assets_w],
-                textposition="top center",
-                line=dict(color='#38bdf8', width=3)
+                textposition='outside'
             ))
-            fig_trend.add_trace(go.Scatter(
+            fig_trend.add_trace(go.Bar(
                 x=hist_df['Date'], y=equity_w, 
                 name='資產淨值 (Net Equity)', 
-                mode='lines+markers+text',
+                marker_color='#10b981',
                 text=[f"{val:.0f}萬" for val in equity_w],
-                textposition="bottom center",
-                line=dict(color='#10b981', width=3)
+                textposition='outside'
             ))
-            fig_trend.add_trace(go.Scatter(
+            fig_trend.add_trace(go.Bar(
                 x=hist_df['Date'], y=stock_w, 
                 name='股票庫存 (Stock Value)', 
-                mode='lines+markers',
-                line=dict(color='#fb7185', width=2, dash='dash')
+                marker_color='#fb7185',
+                text=[f"{val:.0f}萬" for val in stock_w],
+                textposition='outside'
             ))
-            fig_trend.add_trace(go.Scatter(
+            fig_trend.add_trace(go.Bar(
                 x=hist_df['Date'], y=liability_w, 
                 name='總負債 (Liabilities)', 
-                mode='lines+markers',
-                line=dict(color='#f59e0b', width=2, dash='dot')
+                marker_color='#f59e0b',
+                text=[f"{val:.0f}萬" for val in liability_w],
+                textposition='outside'
             ))
             
             fig_trend.update_layout(
+                barmode='group',  # 設定為 Clustered Column Chart (群組柱狀圖)
                 xaxis_title="紀錄日期",
                 yaxis_title="金額 (萬元 NT$)",
                 hovermode="x unified",
                 paper_bgcolor='rgba(0,0,0,0)',
                 plot_bgcolor='rgba(0,0,0,0)',
-                height=400,
-                margin=dict(t=30, b=30, l=10, r=10),
+                height=420,
+                margin=dict(t=40, b=30, l=10, r=10),
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
             )
-            # 強制啟用 Y 軸自動聚焦且不強制從 0 開始，將每週的微幅資產波動顯著呈現
+            # 自動刻度聚焦並設定細緻網格 (不強制從0開始以放大波動，且每 20 萬畫一條精細刻度線)
             fig_trend.update_yaxes(
-                autorange=True, 
+                autorange=True,
+                rangemode='normal',
                 showgrid=True, 
                 gridwidth=1, 
-                gridcolor='rgba(128,128,128,0.12)',
+                gridcolor='rgba(128,128,128,0.15)',
+                dtick=20,  # 20 萬為一個間距，刻度密而精細
                 tickformat=".0f"
             )
             fig_trend.update_xaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.12)')
-            fig_trend.update_xaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.08)')
-            fig_trend.update_yaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.08)')
             st.plotly_chart(fig_trend, use_container_width=True)
         except Exception as e:
             st.error(f"無法繪製每週資產趨勢圖: {e}")
