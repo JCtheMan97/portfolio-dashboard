@@ -946,16 +946,44 @@ if hist_close is not None and not hist_close.empty:
     jensen_alpha_annual = jensen_alpha_period * (365 / min_lookback_days)
 
     # ------------------------------------------------------------
-    # 📈 計算持股本週 (近 5 個交易日) 漲跌幅
+    # 📈 計算持股本週 (近 5 個交易日) 漲跌幅 (融合買入日期與持股成本 Avg_Cost)
     # ------------------------------------------------------------
     weekly_returns = {}
-    for t in tickers:
+    for idx_row, row in active_stock_df.iterrows():
+        t = row['Ticker']
+        if t == 'REALIZED_CASH':
+            continue
+        
+        # 預設為 5 天前歷史收盤價
+        price_prev = 0.0
         if t in hist_close.columns and len(hist_close[t]) >= 2:
             idx_lookback = -min(5, len(hist_close[t]))
-            price_now = float(hist_close[t].iloc[-1])
             price_prev = float(hist_close[t].iloc[idx_lookback])
-            if price_prev > 0:
-                weekly_returns[t] = ((price_now - price_prev) / price_prev) * 100
+            
+        # 檢查買入日期是否在近 7 天內 (即本週剛買，尚未享受整週歷史漲跌幅)
+        buy_date_str = str(row.get('Buy_Date', ''))
+        is_recent_buy = False
+        try:
+            if buy_date_str and buy_date_str.strip():
+                bd = datetime.strptime(buy_date_str.strip(), '%Y-%m-%d').date()
+                if (date.today() - bd).days <= 7:
+                    is_recent_buy = True
+        except Exception:
+            pass
+            
+        # 如果是本週內剛買，基期 Prev_Price 強制改為使用者買入的成本均價 Avg_Cost！
+        avg_cost = float(row.get('Avg_Cost', 0.0))
+        if is_recent_buy and avg_cost > 0.0:
+            price_prev = avg_cost
+            
+        price_now = float(row.get('Current_Price', 0.0))
+        if price_now == 0.0 and t in latest_prices:
+            price_now = float(latest_prices[t])
+            
+        if price_prev > 0.0 and price_now > 0.0:
+            weekly_returns[t] = ((price_now - price_prev) / price_prev) * 100
+        else:
+            weekly_returns[t] = 0.0
 
     active_stock_df['Weekly_Return(%)'] = active_stock_df['Ticker'].map(weekly_returns).fillna(0.0)
 
@@ -1098,7 +1126,7 @@ if hist_close is not None and not hist_close.empty:
         st.markdown("### 📋 【第一部分：現有持股明細】")
         # 繪製本週漲跌最多卡片 (毛玻璃金融微光風格，支援多檔展示與 Fallback 兜底)
         if display_gainers or display_losers:
-            gainer_loser_html = "<div style='display: flex; gap: 12px; margin-bottom: 15px;'>"
+            gainer_loser_html = "<div style='display: flex; gap: 12px; margin-bottom: 15px; align-items: flex-start;'>"
             
             # 領漲區
             if display_gainers:
@@ -1389,23 +1417,60 @@ if hist_close is not None and not hist_close.empty:
                 net_equity=net_equity_calc
             )
             
+            assets_w = hist_df['Total_Assets'] / 10000
+            equity_w = hist_df['Net_Equity'] / 10000
+            stock_w = hist_df['Stock_Value'] / 10000
+            liability_w = hist_df['Total_Liability'] / 10000
+            
             fig_trend = go.Figure()
-            fig_trend.add_trace(go.Bar(x=hist_df['Date'], y=hist_df['Total_Assets'], name='總資產 (Total Assets)', marker_color='#38bdf8'))
-            fig_trend.add_trace(go.Bar(x=hist_df['Date'], y=hist_df['Net_Equity'], name='資產淨值 (Net Equity)', marker_color='#10b981'))
-            fig_trend.add_trace(go.Bar(x=hist_df['Date'], y=hist_df['Stock_Value'], name='股票庫存 (Stock Value)', marker_color='#fb7185'))
-            fig_trend.add_trace(go.Bar(x=hist_df['Date'], y=hist_df['Total_Liability'], name='總負債 (Liabilities)', marker_color='#f59e0b'))
+            fig_trend.add_trace(go.Scatter(
+                x=hist_df['Date'], y=assets_w, 
+                name='總資產 (Total Assets)', 
+                mode='lines+markers+text',
+                text=[f"{val:.0f}萬" for val in assets_w],
+                textposition="top center",
+                line=dict(color='#38bdf8', width=3)
+            ))
+            fig_trend.add_trace(go.Scatter(
+                x=hist_df['Date'], y=equity_w, 
+                name='資產淨值 (Net Equity)', 
+                mode='lines+markers+text',
+                text=[f"{val:.0f}萬" for val in equity_w],
+                textposition="bottom center",
+                line=dict(color='#10b981', width=3)
+            ))
+            fig_trend.add_trace(go.Scatter(
+                x=hist_df['Date'], y=stock_w, 
+                name='股票庫存 (Stock Value)', 
+                mode='lines+markers',
+                line=dict(color='#fb7185', width=2, dash='dash')
+            ))
+            fig_trend.add_trace(go.Scatter(
+                x=hist_df['Date'], y=liability_w, 
+                name='總負債 (Liabilities)', 
+                mode='lines+markers',
+                line=dict(color='#f59e0b', width=2, dash='dot')
+            ))
             
             fig_trend.update_layout(
-                barmode='group',  # 設定為 Clustered Column Chart (群組柱狀圖)
                 xaxis_title="紀錄日期",
-                yaxis_title="金額 (NT$)",
+                yaxis_title="金額 (萬元 NT$)",
                 hovermode="x unified",
                 paper_bgcolor='rgba(0,0,0,0)',
                 plot_bgcolor='rgba(0,0,0,0)',
-                height=380,
-                margin=dict(t=20, b=20, l=10, r=10),
+                height=400,
+                margin=dict(t=30, b=30, l=10, r=10),
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
             )
+            # 強制啟用 Y 軸自動聚焦且不強制從 0 開始，將每週的微幅資產波動顯著呈現
+            fig_trend.update_yaxes(
+                autorange=True, 
+                showgrid=True, 
+                gridwidth=1, 
+                gridcolor='rgba(128,128,128,0.12)',
+                tickformat=".0f"
+            )
+            fig_trend.update_xaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.12)')
             fig_trend.update_xaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.08)')
             fig_trend.update_yaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.08)')
             st.plotly_chart(fig_trend, use_container_width=True)
