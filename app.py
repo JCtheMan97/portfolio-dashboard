@@ -959,19 +959,29 @@ if hist_close is not None and not hist_close.empty:
 
     active_stock_df['Weekly_Return(%)'] = active_stock_df['Ticker'].map(weekly_returns).fillna(0.0)
 
-    # 找出上漲最多與下跌最多
+    # 找出上漲超過 10% 以及下跌超過 10% 的股票群
     stocks_only = active_stock_df[active_stock_df['Ticker'] != 'REALIZED_CASH']
-    top_gainer = None
-    top_loser = None
+    display_gainers = []
+    display_losers = []
+    
     if not stocks_only.empty:
-        sorted_gainers = stocks_only.sort_values(by='Weekly_Return(%)', ascending=False)
-        top_gainer_row = sorted_gainers.iloc[0]
-        top_loser_row = sorted_gainers.iloc[-1]
-        
-        if top_gainer_row['Weekly_Return(%)'] > 0:
-            top_gainer = top_gainer_row
-        if top_loser_row['Weekly_Return(%)'] < 0:
-            top_loser = top_loser_row
+        # A. 領漲篩選
+        gainers_over_10 = stocks_only[stocks_only['Weekly_Return(%)'] >= 10.0].sort_values(by='Weekly_Return(%)', ascending=False)
+        if not gainers_over_10.empty:
+            display_gainers = [r for _, r in gainers_over_10.iterrows()]
+        else:
+            top_g = stocks_only.sort_values(by='Weekly_Return(%)', ascending=False).iloc[0]
+            if top_g['Weekly_Return(%)'] > 0:
+                display_gainers = [top_g]
+                
+        # B. 領跌篩選
+        losers_over_10 = stocks_only[stocks_only['Weekly_Return(%)'] <= -10.0].sort_values(by='Weekly_Return(%)', ascending=True)
+        if not losers_over_10.empty:
+            display_losers = [r for _, r in losers_over_10.iterrows()]
+        else:
+            top_l = stocks_only.sort_values(by='Weekly_Return(%)', ascending=True).iloc[0]
+            if top_l['Weekly_Return(%)'] < 0:
+                display_losers = [top_l]
 
 
     # ------------------------------------------------------------
@@ -1086,25 +1096,44 @@ if hist_close is not None and not hist_close.empty:
         # 【第一部分：現有持股明細】(Chart on Left, styled table on Right)
         # ------------------------------------------------------------
         st.markdown("### 📋 【第一部分：現有持股明細】")
-        # 繪製本週漲跌最多卡片 (毛玻璃金融微光風格)
-        if top_gainer is not None or top_loser is not None:
+        # 繪製本週漲跌最多卡片 (毛玻璃金融微光風格，支援多檔展示與 Fallback 兜底)
+        if display_gainers or display_losers:
             gainer_loser_html = "<div style='display: flex; gap: 12px; margin-bottom: 15px;'>"
-            if top_gainer is not None:
+            
+            # 領漲區
+            if display_gainers:
+                title_g = "📈 本週漲幅 10% 以上標的" if any(r['Weekly_Return(%)'] >= 10.0 for r in display_gainers) else "📈 本週持股領漲標的"
+                items_g_html = ""
+                for r in display_gainers:
+                    items_g_html += f'''
+                    <div style="margin-top: 6px; display: flex; justify-content: space-between;">
+                        <span style="font-size: 15px; font-weight: bold; color: #00cc66;">{r['股票名稱']} ({r['Ticker'].split('.')[0]})</span>
+                        <span style="font-size: 15px; font-weight: bold; color: #00cc66;">+{r['Weekly_Return(%)']:.2f}%</span>
+                    </div>'''
                 gainer_loser_html += f"""
-                <div style="flex: 1; background: rgba(0, 204, 102, 0.05); border: 1px solid rgba(0, 204, 102, 0.15); border-radius: 6px; padding: 10px; border-left: 4px solid #00cc66;">
-                    <span style="font-size: 12px; color: var(--text-color); opacity: 0.7;">📈 本週持股領漲標的</span><br>
-                    <span style="font-size: 15px; font-weight: bold; color: #00cc66;">{top_gainer['股票名稱']} ({top_gainer['Ticker'].split('.')[0]})</span>
-                    <span style="font-size: 15px; font-weight: bold; margin-left: 8px; color: #00cc66;">+{top_gainer['Weekly_Return(%)']:.2f}%</span>
+                <div style="flex: 1; background: rgba(0, 204, 102, 0.05); border: 1px solid rgba(0, 204, 102, 0.15); border-radius: 8px; padding: 12px; border-left: 4px solid #00cc66;">
+                    <span style="font-size: 12px; color: var(--text-color); opacity: 0.7; font-weight: 600;">{title_g}</span>
+                    {items_g_html}
                 </div>
                 """
-            if top_loser is not None:
+            
+            # 領跌區
+            if display_losers:
+                title_l = "📉 本週跌幅 10% 以上標的" if any(r['Weekly_Return(%)'] <= -10.0 for r in display_losers) else "📉 本週持股領跌標的"
+                items_l_html = ""
+                for r in display_losers:
+                    items_l_html += f'''
+                    <div style="margin-top: 6px; display: flex; justify-content: space-between;">
+                        <span style="font-size: 15px; font-weight: bold; color: #ff4b4b;">{r['股票名稱']} ({r['Ticker'].split('.')[0]})</span>
+                        <span style="font-size: 15px; font-weight: bold; color: #ff4b4b;">{r['Weekly_Return(%)']:.2f}%</span>
+                    </div>'''
                 gainer_loser_html += f"""
-                <div style="flex: 1; background: rgba(255, 75, 75, 0.05); border: 1px solid rgba(255, 75, 75, 0.15); border-radius: 6px; padding: 10px; border-left: 4px solid #ff4b4b;">
-                    <span style="font-size: 12px; color: var(--text-color); opacity: 0.7;">📉 本週持股領跌標的</span><br>
-                    <span style="font-size: 15px; font-weight: bold; color: #ff4b4b;">{top_loser['股票名稱']} ({top_loser['Ticker'].split('.')[0]})</span>
-                    <span style="font-size: 15px; font-weight: bold; margin-left: 8px; color: #ff4b4b;">{top_loser['Weekly_Return(%)']:.2f}%</span>
+                <div style="flex: 1; background: rgba(255, 75, 75, 0.05); border: 1px solid rgba(255, 75, 75, 0.15); border-radius: 8px; padding: 12px; border-left: 4px solid #ff4b4b;">
+                    <span style="font-size: 12px; color: var(--text-color); opacity: 0.7; font-weight: 600;">{title_l}</span>
+                    {items_l_html}
                 </div>
                 """
+                
             gainer_loser_html += "</div>"
             st.markdown(gainer_loser_html, unsafe_allow_html=True)
 
@@ -1359,12 +1388,13 @@ if hist_close is not None and not hist_close.empty:
             )
             
             fig_trend = go.Figure()
-            fig_trend.add_trace(go.Scatter(x=hist_df['Date'], y=hist_df['Total_Assets'], name='總資產 (Total Assets)', line=dict(color='#38bdf8', width=3)))
-            fig_trend.add_trace(go.Scatter(x=hist_df['Date'], y=hist_df['Net_Equity'], name='資產淨值 (Net Equity)', line=dict(color='#10b981', width=3)))
-            fig_trend.add_trace(go.Scatter(x=hist_df['Date'], y=hist_df['Stock_Value'], name='股票庫存 (Stock Value)', line=dict(color='#fb7185', width=2, dash='dash')))
-            fig_trend.add_trace(go.Scatter(x=hist_df['Date'], y=hist_df['Total_Liability'], name='總負債 (Liabilities)', line=dict(color='#f59e0b', width=2, dash='dot')))
+            fig_trend.add_trace(go.Bar(x=hist_df['Date'], y=hist_df['Total_Assets'], name='總資產 (Total Assets)', marker_color='#38bdf8'))
+            fig_trend.add_trace(go.Bar(x=hist_df['Date'], y=hist_df['Net_Equity'], name='資產淨值 (Net Equity)', marker_color='#10b981'))
+            fig_trend.add_trace(go.Bar(x=hist_df['Date'], y=hist_df['Stock_Value'], name='股票庫存 (Stock Value)', marker_color='#fb7185'))
+            fig_trend.add_trace(go.Bar(x=hist_df['Date'], y=hist_df['Total_Liability'], name='總負債 (Liabilities)', marker_color='#f59e0b'))
             
             fig_trend.update_layout(
+                barmode='group',  # 設定為 Clustered Column Chart (群組柱狀圖)
                 xaxis_title="紀錄日期",
                 yaxis_title="金額 (NT$)",
                 hovermode="x unified",
