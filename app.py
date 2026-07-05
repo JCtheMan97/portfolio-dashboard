@@ -982,8 +982,15 @@ if hist_close is not None and not hist_close.empty:
     jensen_alpha_annual = jensen_alpha_period * (365 / min_lookback_days)
 
     # ------------------------------------------------------------
-    # 📈 計算持股本週 (近 5 個交易日) 漲跌幅 (融合買入日期與持股成本 Avg_Cost)
+    # 📈 計算持股近 5 個交易日漲跌幅 (融合買入日期與持股成本 Avg_Cost)
     # ------------------------------------------------------------
+    start_date_weekly = ""
+    end_date_weekly = ""
+    if hist_close is not None and not hist_close.empty:
+        idx_lbl = -min(5, len(hist_close))
+        start_date_weekly = hist_close.index[idx_lbl].strftime('%Y-%m-%d')
+        end_date_weekly = hist_close.index[-1].strftime('%Y-%m-%d')
+
     weekly_returns = {}
     for idx_row, row in active_stock_df.iterrows():
         t = row['Ticker']
@@ -1166,7 +1173,8 @@ if hist_close is not None and not hist_close.empty:
             
             # 領漲區 (寬度 100%)
             if display_gainers:
-                title_g = "📈 本週漲幅 10% 以上標的" if any(r['Weekly_Return(%)'] >= 10.0 for r in display_gainers) else "📈 本週持股領漲標的"
+                date_range_str = f" ({start_date_weekly} ~ {end_date_weekly})" if start_date_weekly else ""
+                title_g = f"📈 近 5 個交易日漲幅 10% 以上標的{date_range_str}" if any(r['Weekly_Return(%)'] >= 10.0 for r in display_gainers) else f"📈 近 5 個交易日持股領漲標的{date_range_str}"
                 items_g_html = ""
                 for r in display_gainers:
                     items_g_html += f'''
@@ -1184,7 +1192,8 @@ if hist_close is not None and not hist_close.empty:
             
             # 領跌區 (寬度 100%)
             if display_losers:
-                title_l = "📉 本週跌幅 10% 以上標的" if any(r['Weekly_Return(%)'] <= -10.0 for r in display_losers) else "📉 本週持股領跌標的"
+                date_range_str = f" ({start_date_weekly} ~ {end_date_weekly})" if start_date_weekly else ""
+                title_l = f"📉 近 5 個交易日跌幅 10% 以上標的{date_range_str}" if any(r['Weekly_Return(%)'] <= -10.0 for r in display_losers) else f"📉 近 5 個交易日持股領跌標的{date_range_str}"
                 items_l_html = ""
                 for r in display_losers:
                     items_l_html += f'''
