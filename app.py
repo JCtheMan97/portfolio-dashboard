@@ -1135,7 +1135,9 @@ if hist_close is not None and not hist_close.empty:
                 """
                 
             gainer_loser_html += "</div>"
-            st.markdown(gainer_loser_html, unsafe_allow_html=True)
+            # 🚀 壓縮 HTML，清除所有行首前導縮排與換行，完美防止 Markdown 將其誤判為 Code Block！
+            compact_html = "".join([line.strip() for line in gainer_loser_html.split('\n')])
+            st.markdown(compact_html, unsafe_allow_html=True)
 
         table_df = active_stock_df.sort_values(by='Weight(%)', ascending=False).copy()
         
