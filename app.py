@@ -932,6 +932,42 @@ if hist_close is not None and not hist_close.empty:
     active_stock_df['Beta'] = active_stock_df['Ticker'].map(betas)
     portfolio_weighted_beta = (active_stock_df['Weight(%)'] / 100 * active_stock_df['Beta']).sum()
 
+    # ------------------------------------------------------------
+    # 🛡️ 危機模式 Beta (Crisis-Mode Beta / Stress Beta) 演算法
+    # ------------------------------------------------------------
+    panic_days = recent_twii_returns[recent_twii_returns <= -1.0]
+    crisis_betas = {}
+    
+    if len(panic_days) >= 5:
+        panic_indices = panic_days.index
+        for t in tickers:
+            if t in hist_close.columns:
+                recent_t_returns = hist_close[t].pct_change().dropna()
+                # 只對應抽取大盤重跌日的樣本來算
+                t_panic = recent_t_returns.reindex(panic_indices).dropna()
+                twii_panic_aligned = recent_twii_returns.loc[t_panic.index]
+                
+                if len(t_panic) >= 5 and twii_panic_aligned.var() > 0:
+                    cov_panic = t_panic.cov(twii_panic_aligned)
+                    calc_crisis_beta = cov_panic / twii_panic_aligned.var()
+                    
+                    hist_b = betas.get(t, 1.0)
+                    # 崩盤時相關性向 1.0 收斂，與歷史 Beta 取最大與平均收斂值的 max
+                    crisis_betas[t] = max(calc_crisis_beta, (hist_b + 1.2) / 2.0)
+                else:
+                    hist_b = betas.get(t, 1.0)
+                    crisis_betas[t] = max(hist_b, (hist_b + 1.2) / 2.0)
+            else:
+                crisis_betas[t] = 1.0
+    else:
+        # 樣本不足時，採用防守性「關聯性收斂公式」
+        for t in tickers:
+            hist_b = betas.get(t, 1.0)
+            crisis_betas[t] = max(hist_b, (hist_b + 1.2) / 2.0)
+            
+    active_stock_df['Crisis_Beta'] = active_stock_df['Ticker'].map(crisis_betas).round(2)
+    portfolio_weighted_crisis_beta = (active_stock_df['Weight(%)'] / 100 * active_stock_df['Crisis_Beta']).sum()
+
     # Jensen's Alpha
     rf_period_return = annual_rf * (min_lookback_days / 365) * 100
     active_stock_df['Start_Price'] = active_stock_df['Ticker'].map(lambda t: float(hist_close[t].iloc[0]) if t in hist_close.columns else latest_prices.get(t, 0.0))
@@ -1346,10 +1382,15 @@ if hist_close is not None and not hist_close.empty:
         st.write("")
         st.markdown("### 🛡️ 【第四部分：雙向極端壓力測試】")
         st.write("拖拉調整大盤在**連續跌停/修正波段**中的累積跌幅，即時演算您的本金損益與質押維持率的動態變化：")
+        
+        # 顯示危機 Beta 風控說明卡片，提示已啟動恐慌收斂模型
+        st.info(f"💡 **[危機模式 Beta 已啟用]** 當前壓力測試已自動採用「恐慌收斂 Beta」(加權組合: **{portfolio_weighted_crisis_beta:.2f}**，高於承平時期 Beta: **{portfolio_weighted_beta:.2f}**)。此算法模擬了系統性大跌時低波動防禦股關聯性往上收斂的實務情境，估計結果更為保守安全。")
+        
         sim_drop = st.slider("模擬大盤波段累積跌幅 (%)", min_value=0.0, max_value=30.0, value=3.0, step=1.0)
         
-        sim_expected_dd = sim_drop * portfolio_weighted_beta * effective_stock_leverage_mv
-        sim_portfolio_value_loss = total_stock_market_value * (sim_drop / 100 * portfolio_weighted_beta)
+        # 🚀 壓力測試減損模擬全量替換為 portfolio_weighted_crisis_beta！
+        sim_expected_dd = sim_drop * portfolio_weighted_crisis_beta * effective_stock_leverage_mv
+        sim_portfolio_value_loss = total_stock_market_value * (sim_drop / 100 * portfolio_weighted_crisis_beta)
         sim_net_equity = max(current_net_equity - sim_portfolio_value_loss, 1.0)
         sim_roe = ((net_profit_accumulated - sim_portfolio_value_loss) / true_injected_capital) * 100
         
@@ -1366,7 +1407,7 @@ if hist_close is not None and not hist_close.empty:
             for loan in loans:
                 if loan.get('margin_loan'):
                     m_ratio = loan.get('margin_ratio')
-                    sim_ratio = m_ratio * (1 - (sim_drop / 100 * portfolio_weighted_beta))
+                    sim_ratio = m_ratio * (1 - (sim_drop / 100 * portfolio_weighted_crisis_beta))
                     c_thresh = loan.get('call_threshold', 130.0)
                     r_thresh = loan.get('recover_threshold', 166.0)
                     
