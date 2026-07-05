@@ -31,10 +31,102 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# ------------------------------------------------------------
+# 部署安全性：簡單的密碼驗證機制 (基於 st.secrets)
+# ------------------------------------------------------------
+def check_password():
+    """Returns True if the user had the correct password."""
+    if "auth" not in st.secrets or "password" not in st.secrets["auth"]:
+        return True
+
+    def password_entered():
+        if st.session_state["password"] == st.secrets["auth"]["password"]:
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]
+        else:
+            st.session_state["password_correct"] = False
+
+    if "password_correct" not in st.session_state:
+        st.text_input(
+            "🔑 請輸入密碼解鎖 dashboard",
+            type="password",
+            on_change=password_entered,
+            key="password",
+        )
+        return False
+    elif not st.session_state["password_correct"]:
+        st.text_input(
+            "🔑 請輸入密碼解鎖 dashboard",
+            type="password",
+            on_change=password_entered,
+            key="password",
+        )
+        st.error("😕 密碼錯誤，請重新輸入！")
+        return False
+    else:
+        return True
+
+if not check_password():
+    st.stop()
+
+ASSET_HISTORY_FILE_PATH = os.path.join(os.path.dirname(__file__), 'asset_history.csv')
+
+def track_weekly_assets(total_assets, total_liability, stock_value, net_equity):
+    """每週自動記錄一次資產狀況"""
+    today_str = date.today().isoformat()
+    new_row = {
+        "Date": today_str,
+        "Total_Assets": round(total_assets),
+        "Total_Liability": round(total_liability),
+        "Stock_Value": round(stock_value),
+        "Net_Equity": round(net_equity)
+    }
+    
+    if not os.path.exists(ASSET_HISTORY_FILE_PATH):
+        d4 = (date.today() - timedelta(days=28)).isoformat()
+        d3 = (date.today() - timedelta(days=21)).isoformat()
+        d2 = (date.today() - timedelta(days=14)).isoformat()
+        d1 = (date.today() - timedelta(days=7)).isoformat()
+        
+        demo_data = pd.DataFrame([
+            {"Date": d4, "Total_Assets": round(total_assets * 0.92), "Total_Liability": round(total_liability), "Stock_Value": round(stock_value * 0.90), "Net_Equity": round(net_equity * 0.93)},
+            {"Date": d3, "Total_Assets": round(total_assets * 0.94), "Total_Liability": round(total_liability), "Stock_Value": round(stock_value * 0.93), "Net_Equity": round(net_equity * 0.95)},
+            {"Date": d2, "Total_Assets": round(total_assets * 0.97), "Total_Liability": round(total_liability), "Stock_Value": round(stock_value * 0.96), "Net_Equity": round(net_equity * 0.97)},
+            {"Date": d1, "Total_Assets": round(total_assets * 0.99), "Total_Liability": round(total_liability), "Stock_Value": round(stock_value * 0.99), "Net_Equity": round(net_equity * 0.99)},
+            new_row
+        ])
+        demo_data.to_csv(ASSET_HISTORY_FILE_PATH, index=False)
+        return demo_data
+        
+    try:
+        df = pd.read_csv(ASSET_HISTORY_FILE_PATH)
+        if df.empty:
+            df = pd.DataFrame([new_row])
+            df.to_csv(ASSET_HISTORY_FILE_PATH, index=False)
+            return df
+            
+        last_date_str = str(df.iloc[-1]['Date'])
+        last_date = datetime.strptime(last_date_str, '%Y-%m-%d').date()
+        
+        days_diff = (date.today() - last_date).days
+        if days_diff >= 7:
+            if today_str in df['Date'].values:
+                df.loc[df['Date'] == today_str, ["Total_Assets", "Total_Liability", "Stock_Value", "Net_Equity"]] = [
+                    new_row["Total_Assets"], new_row["Total_Liability"], new_row["Stock_Value"], new_row["Net_Equity"]
+                ]
+            else:
+                df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+            df.to_csv(ASSET_HISTORY_FILE_PATH, index=False)
+    except Exception:
+        pass
+    
+    return pd.read_csv(ASSET_HISTORY_FILE_PATH)
+
+
 # Custom CSS disabled to let Streamlit style sidebar and layout automatically based on system theme.
 
 CSV_FILE_PATH = os.path.join(os.path.dirname(__file__), 'portfolio_data.csv')
-HISTORY_FILE_PATH = os.path.join(os.path.dirname(__file__), 'performance_history.csv')
+# HISTORY_FILE_PATH removed
 LOANS_FILE_PATH = os.path.join(os.path.dirname(__file__), 'loans_data.csv')
 
 # ============================================================
@@ -180,15 +272,7 @@ def get_portfolio_value_on_date(hist_df, portfolio_df, target_date_str):
 # ============================================================
 # Core Functions & Default Loans CSV
 # ============================================================
-def init_performance_history():
-    if not os.path.exists(HISTORY_FILE_PATH):
-        demo_data = pd.DataFrame([
-            {"Date": "2026-05-15", "Portfolio_Return_Pct": 0.0, "TWII_Return_Pct": 0.0, "Net_Equity": 5000000.0, "TWII_Index": 21000.0},
-            {"Date": "2026-06-01", "Portfolio_Return_Pct": 3.5, "TWII_Return_Pct": 2.1, "Net_Equity": 5175000.0, "TWII_Index": 21441.0},
-            {"Date": "2026-06-15", "Portfolio_Return_Pct": 8.2, "TWII_Return_Pct": 4.3, "Net_Equity": 5410000.0, "TWII_Index": 21903.0},
-            {"Date": "2026-07-01", "Portfolio_Return_Pct": 12.1, "TWII_Return_Pct": 7.5, "Net_Equity": 5605000.0, "TWII_Index": 22575.0}
-        ])
-        demo_data.to_csv(HISTORY_FILE_PATH, index=False)
+
 
 def get_default_loans_data():
     if os.path.exists(LOANS_FILE_PATH):
@@ -345,12 +429,7 @@ SCENARIO_DATABASE = {
                 'recover_threshold': 166.0,
                 'liquidation_threshold': 110.0,
                 'has_open_margin_call_record': False,
-                'margin_history': [
-                    {'date': '2026-06-15', 'margin_ratio': 195.0},
-                    {'date': '2026-06-22', 'margin_ratio': 190.0},
-                    {'date': '2026-06-29', 'margin_ratio': 185.0},
-                    {'date': '2026-07-04', 'margin_ratio': 188.0}
-                ]
+
             }
         ]
     },
@@ -382,12 +461,7 @@ SCENARIO_DATABASE = {
                 'liquidation_threshold': 110.0,
                 'has_open_margin_call_record': False,
                 'margin_as_of_date': '2026-07-04',
-                'margin_history': [
-                    {'date': '2026-06-15', 'margin_ratio': 240.0},
-                    {'date': '2026-06-22', 'margin_ratio': 235.0},
-                    {'date': '2026-06-29', 'margin_ratio': 228.0},
-                    {'date': '2026-07-04', 'margin_ratio': 231.0}
-                ]
+
             }
         ]
     },
@@ -872,6 +946,35 @@ if hist_close is not None and not hist_close.empty:
     jensen_alpha_annual = jensen_alpha_period * (365 / min_lookback_days)
 
     # ------------------------------------------------------------
+    # 📈 計算持股本週 (近 5 個交易日) 漲跌幅
+    # ------------------------------------------------------------
+    weekly_returns = {}
+    for t in tickers:
+        if t in hist_close.columns and len(hist_close[t]) >= 2:
+            idx_lookback = -min(5, len(hist_close[t]))
+            price_now = float(hist_close[t].iloc[-1])
+            price_prev = float(hist_close[t].iloc[idx_lookback])
+            if price_prev > 0:
+                weekly_returns[t] = ((price_now - price_prev) / price_prev) * 100
+
+    active_stock_df['Weekly_Return(%)'] = active_stock_df['Ticker'].map(weekly_returns).fillna(0.0)
+
+    # 找出上漲最多與下跌最多
+    stocks_only = active_stock_df[active_stock_df['Ticker'] != 'REALIZED_CASH']
+    top_gainer = None
+    top_loser = None
+    if not stocks_only.empty:
+        sorted_gainers = stocks_only.sort_values(by='Weekly_Return(%)', ascending=False)
+        top_gainer_row = sorted_gainers.iloc[0]
+        top_loser_row = sorted_gainers.iloc[-1]
+        
+        if top_gainer_row['Weekly_Return(%)'] > 0:
+            top_gainer = top_gainer_row
+        if top_loser_row['Weekly_Return(%)'] < 0:
+            top_loser = top_loser_row
+
+
+    # ------------------------------------------------------------
     # 🏦 Dynamic and Calculated Loans sync logic
     # ------------------------------------------------------------
     loans = []
@@ -983,6 +1086,28 @@ if hist_close is not None and not hist_close.empty:
         # 【第一部分：現有持股明細】(Chart on Left, styled table on Right)
         # ------------------------------------------------------------
         st.markdown("### 📋 【第一部分：現有持股明細】")
+        # 繪製本週漲跌最多卡片 (毛玻璃金融微光風格)
+        if top_gainer is not None or top_loser is not None:
+            gainer_loser_html = "<div style='display: flex; gap: 12px; margin-bottom: 15px;'>"
+            if top_gainer is not None:
+                gainer_loser_html += f"""
+                <div style="flex: 1; background: rgba(0, 204, 102, 0.05); border: 1px solid rgba(0, 204, 102, 0.15); border-radius: 6px; padding: 10px; border-left: 4px solid #00cc66;">
+                    <span style="font-size: 12px; color: var(--text-color); opacity: 0.7;">📈 本週持股領漲標的</span><br>
+                    <span style="font-size: 15px; font-weight: bold; color: #00cc66;">{top_gainer['股票名稱']} ({top_gainer['Ticker'].split('.')[0]})</span>
+                    <span style="font-size: 15px; font-weight: bold; margin-left: 8px; color: #00cc66;">+{top_gainer['Weekly_Return(%)']:.2f}%</span>
+                </div>
+                """
+            if top_loser is not None:
+                gainer_loser_html += f"""
+                <div style="flex: 1; background: rgba(255, 75, 75, 0.05); border: 1px solid rgba(255, 75, 75, 0.15); border-radius: 6px; padding: 10px; border-left: 4px solid #ff4b4b;">
+                    <span style="font-size: 12px; color: var(--text-color); opacity: 0.7;">📉 本週持股領跌標的</span><br>
+                    <span style="font-size: 15px; font-weight: bold; color: #ff4b4b;">{top_loser['股票名稱']} ({top_loser['Ticker'].split('.')[0]})</span>
+                    <span style="font-size: 15px; font-weight: bold; margin-left: 8px; color: #ff4b4b;">{top_loser['Weekly_Return(%)']:.2f}%</span>
+                </div>
+                """
+            gainer_loser_html += "</div>"
+            st.markdown(gainer_loser_html, unsafe_allow_html=True)
+
         table_df = active_stock_df.sort_values(by='Weight(%)', ascending=False).copy()
         
         col_chart, col_table = st.columns([1, 2])
@@ -1214,6 +1339,47 @@ if hist_close is not None and not hist_close.empty:
         st.write("")
         # AI Health Check: [心理安全墊]
         st.success(f"🟩 **[AI 心理防線與策略建議]** 目前 {safe_cushion_weight:.1f}% 的資金已拉開 >10% 的利潤空間，利於放寬波動容忍度讓利潤奔跑。另有 {danger_cushion_weight:.1f}% 的部位處於未實現虧損，屬於需防守的區域，汰弱留強。")
+
+        # ------------------------------------------------------------
+        # 【每週資產歷史趨勢折線圖】
+        # ------------------------------------------------------------
+        st.markdown("---")
+        st.markdown("### 📈 【每週資產歷史趨勢折線圖】")
+        try:
+            total_assets_calc = total_stock_market_value + current_cash
+            total_liability_calc = sum(float(l['principal']) if 'principal' in l else float(l.get('Principal', 0.0)) for l in loans)
+            stock_value_calc = total_stock_market_value
+            net_equity_calc = total_assets_calc - total_liability_calc
+            
+            hist_df = track_weekly_assets(
+                total_assets=total_assets_calc,
+                total_liability=total_liability_calc,
+                stock_value=stock_value_calc,
+                net_equity=net_equity_calc
+            )
+            
+            fig_trend = go.Figure()
+            fig_trend.add_trace(go.Scatter(x=hist_df['Date'], y=hist_df['Total_Assets'], name='總資產 (Total Assets)', line=dict(color='#38bdf8', width=3)))
+            fig_trend.add_trace(go.Scatter(x=hist_df['Date'], y=hist_df['Net_Equity'], name='資產淨值 (Net Equity)', line=dict(color='#10b981', width=3)))
+            fig_trend.add_trace(go.Scatter(x=hist_df['Date'], y=hist_df['Stock_Value'], name='股票庫存 (Stock Value)', line=dict(color='#fb7185', width=2, dash='dash')))
+            fig_trend.add_trace(go.Scatter(x=hist_df['Date'], y=hist_df['Total_Liability'], name='總負債 (Liabilities)', line=dict(color='#f59e0b', width=2, dash='dot')))
+            
+            fig_trend.update_layout(
+                xaxis_title="紀錄日期",
+                yaxis_title="金額 (NT$)",
+                hovermode="x unified",
+                paper_bgcolor='rgba(0,0,0,0)',
+                plot_bgcolor='rgba(0,0,0,0)',
+                height=380,
+                margin=dict(t=20, b=20, l=10, r=10),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+            )
+            fig_trend.update_xaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.08)')
+            fig_trend.update_yaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.08)')
+            st.plotly_chart(fig_trend, use_container_width=True)
+        except Exception as e:
+            st.error(f"無法繪製每週資產趨勢圖: {e}")
+
 
         # ------------------------------------------------------------
         # Editors section: Holdings & Loans CSV databases (Spreadsheet designs)
