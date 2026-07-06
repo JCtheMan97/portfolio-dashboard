@@ -1978,26 +1978,26 @@ if hist_close is not None and not hist_close.empty:
                     else:
                         clean_stocks.append(stock)
                 
-                # Show Tab 2 summary (Custom linear-gradient HTML cards to distinguish visual layers)
+                # Show Tab 2 summary (Custom light/pastel gradient HTML cards matching the previous theme)
                 col_sum1, col_sum2 = st.columns(2)
                 with col_sum1:
                     st.markdown(f"""
-                    <div style='background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
-                                padding: 22px 24px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.1);
-                                color: white; box-shadow: 0 4px 15px rgba(0,0,0,0.15); margin-bottom: 12px;'>
-                        <div style='font-size: 13.5px; font-weight: 700; opacity: 0.85;'>近 30 天重要訊息總數</div>
-                        <div style='font-size: 32px; font-weight: 800; margin: 8px 0; color: #63b3ed;'>{total_alerts} 筆</div>
-                        <div style='font-size: 12px; opacity: 0.75;'>30天內公開觀測站重大訊息總計</div>
+                    <div style='background: linear-gradient(135deg, rgba(56, 189, 248, 0.04) 0%, rgba(56, 189, 248, 0.08) 100%);
+                                padding: 18px 20px; border-radius: 8px; border: 1px solid rgba(56, 189, 248, 0.15);
+                                border-left: 5px solid #38bdf8; margin-bottom: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.02);'>
+                        <div style='font-size: 12px; color: var(--text-color); opacity: 0.7; font-weight: 600;'>近 30 天重要訊息總數</div>
+                        <div style='font-size: 26px; font-weight: 800; margin: 4px 0; color: #38bdf8;'>{total_alerts} 筆</div>
+                        <div style='font-size: 12px; color: var(--text-color); opacity: 0.65;'>30天內公開觀測站重大訊息總計</div>
                     </div>
                     """, unsafe_allow_html=True)
                 with col_sum2:
                     st.markdown(f"""
-                    <div style='background: linear-gradient(135deg, #ff416c 0%, #ff4b2b 100%);
-                                padding: 22px 24px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.1);
-                                color: white; box-shadow: 0 4px 15px rgba(0,0,0,0.15); margin-bottom: 12px;'>
-                        <div style='font-size: 13.5px; font-weight: 700; opacity: 0.85;'>今日最新即時發布</div>
-                        <div style='font-size: 32px; font-weight: 800; margin: 8px 0; color: #ffffff;'>{today_alerts} 筆</div>
-                        <div style='font-size: 12px; opacity: 0.75;'>今日新公布之即時重訊</div>
+                    <div style='background: linear-gradient(135deg, rgba(255, 75, 75, 0.04) 0%, rgba(255, 75, 75, 0.08) 100%);
+                                padding: 18px 20px; border-radius: 8px; border: 1px solid rgba(255, 75, 75, 0.15);
+                                border-left: 5px solid #ff4b4b; margin-bottom: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.02);'>
+                        <div style='font-size: 12px; color: var(--text-color); opacity: 0.7; font-weight: 600;'>今日最新即時發布</div>
+                        <div style='font-size: 26px; font-weight: 800; margin: 4px 0; color: #ff4b4b;'>{today_alerts} 筆</div>
+                        <div style='font-size: 12px; color: var(--text-color); opacity: 0.65;'>今日新公布之即時重訊</div>
                     </div>
                     """, unsafe_allow_html=True)
                 
