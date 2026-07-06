@@ -105,6 +105,16 @@ def track_weekly_assets(total_assets, total_liability, stock_value, net_equity):
             df.to_csv(ASSET_HISTORY_FILE_PATH, index=False)
             return df
             
+        # 🚀 自動升級舊檔案：若前 4 行 (預設歷史基底) 為純日期格式 (長度為 10)，自動補上 " (預估)" 尾綴
+        updated_any = False
+        for idx_row in range(min(4, len(df))):
+            curr_val = str(df.iloc[idx_row]['Date'])
+            if len(curr_val.strip()) == 10 and curr_val != today_str:
+                df.iloc[idx_row, df.columns.get_loc('Date')] = curr_val.strip() + " (預估)"
+                updated_any = True
+        if updated_any:
+            df.to_csv(ASSET_HISTORY_FILE_PATH, index=False)
+            
         last_date_str = str(df.iloc[-1]['Date'])
         # 🚀 支援帶有 " (預估)" 尾綴的歷史日期，以空格分割取出 YYYY-MM-DD 純日期部分
         pure_date_str = last_date_str.split()[0]
