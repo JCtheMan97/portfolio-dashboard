@@ -83,10 +83,10 @@ def track_weekly_assets(total_assets, total_liability, stock_value, net_equity):
     }
     
     if not os.path.exists(ASSET_HISTORY_FILE_PATH):
-        d4 = (date.today() - timedelta(days=28)).isoformat() + " (預估)"
-        d3 = (date.today() - timedelta(days=21)).isoformat() + " (預估)"
-        d2 = (date.today() - timedelta(days=14)).isoformat() + " (預估)"
-        d1 = (date.today() - timedelta(days=7)).isoformat() + " (預估)"
+        d4 = (date.today() - timedelta(days=28)).isoformat()
+        d3 = (date.today() - timedelta(days=21)).isoformat()
+        d2 = (date.today() - timedelta(days=14)).isoformat()
+        d1 = (date.today() - timedelta(days=7)).isoformat()
         
         demo_data = pd.DataFrame([
             {"Date": d4, "Total_Assets": round(total_assets * 0.92), "Total_Liability": round(total_liability), "Stock_Value": round(stock_value * 0.90), "Net_Equity": round(net_equity * 0.93)},
@@ -105,12 +105,12 @@ def track_weekly_assets(total_assets, total_liability, stock_value, net_equity):
             df.to_csv(ASSET_HISTORY_FILE_PATH, index=False)
             return df
             
-        # 🚀 自動升級舊檔案：若前 4 行 (預設歷史基底) 為純日期格式 (長度為 10)，自動補上 " (預估)" 尾綴
+        # 🚀 自動修復被污染的舊 CSV 格式：將 Date 中的 " (預估)" 字眼徹底剔除，回歸純日期 YYYY-MM-DD
         updated_any = False
-        for idx_row in range(min(4, len(df))):
+        for idx_row in range(len(df)):
             curr_val = str(df.iloc[idx_row]['Date'])
-            if len(curr_val.strip()) == 10 and curr_val != today_str:
-                df.iloc[idx_row, df.columns.get_loc('Date')] = curr_val.strip() + " (預估)"
+            if " (預估)" in curr_val:
+                df.iloc[idx_row, df.columns.get_loc('Date')] = curr_val.replace(" (預估)", "").strip()
                 updated_any = True
         if updated_any:
             df.to_csv(ASSET_HISTORY_FILE_PATH, index=False)
@@ -1487,30 +1487,39 @@ if hist_close is not None and not hist_close.empty:
             stock_w = hist_df['Stock_Value'] / 10000
             liability_w = hist_df['Total_Liability'] / 10000
             
+            # 建立用於 X 軸顯示的標籤 (CSV 保持純日期，圖表上動態將前 4 筆歷史預估資料標記 " (預估)")
+            x_labels = []
+            for idx_row, row_val in enumerate(hist_df['Date']):
+                date_str = str(row_val).replace(" (預估)", "").strip()
+                if idx_row < 4 and date_str != today_str:
+                    x_labels.append(f"{date_str} (預估)")
+                else:
+                    x_labels.append(date_str)
+            
             fig_trend = go.Figure()
             fig_trend.add_trace(go.Bar(
-                x=hist_df['Date'], y=assets_w, 
+                x=x_labels, y=assets_w, 
                 name='總資產 (Total Assets)', 
                 marker_color='#38bdf8',
                 text=[f"{val:.0f}萬" for val in assets_w],
                 textposition='outside'
             ))
             fig_trend.add_trace(go.Bar(
-                x=hist_df['Date'], y=equity_w, 
+                x=x_labels, y=equity_w, 
                 name='資產淨值 (Net Equity)', 
                 marker_color='#10b981',
                 text=[f"{val:.0f}萬" for val in equity_w],
                 textposition='outside'
             ))
             fig_trend.add_trace(go.Bar(
-                x=hist_df['Date'], y=stock_w, 
+                x=x_labels, y=stock_w, 
                 name='股票庫存 (Stock Value)', 
                 marker_color='#fb7185',
                 text=[f"{val:.0f}萬" for val in stock_w],
                 textposition='outside'
             ))
             fig_trend.add_trace(go.Bar(
-                x=hist_df['Date'], y=liability_w, 
+                x=x_labels, y=liability_w, 
                 name='總負債 (Liabilities)', 
                 marker_color='#f59e0b',
                 text=[f"{val:.0f}萬" for val in liability_w],
