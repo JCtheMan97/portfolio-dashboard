@@ -1470,6 +1470,7 @@ if hist_close is not None and not hist_close.empty:
         st.markdown("---")
         st.markdown("### 📈 【每週資產歷史趨勢折線圖】")
         try:
+            today_str = date.today().isoformat()
             total_assets_calc = total_stock_market_value + current_cash
             total_liability_calc = sum(float(l['principal']) if 'principal' in l else float(l.get('Principal', 0.0)) for l in loans)
             stock_value_calc = total_stock_market_value
