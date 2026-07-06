@@ -72,7 +72,7 @@ if not check_password():
 ASSET_HISTORY_FILE_PATH = os.path.join(os.path.dirname(__file__), 'asset_history.csv')
 
 def track_weekly_assets(total_assets, total_liability, stock_value, net_equity):
-    """每週自動記錄一次資產狀況"""
+    """每週自動記錄一次資產狀況 (極致自癒防護版)"""
     today_str = date.today().isoformat()
     new_row = {
         "Date": today_str,
@@ -82,56 +82,31 @@ def track_weekly_assets(total_assets, total_liability, stock_value, net_equity):
         "Net_Equity": round(net_equity)
     }
     
+    trigger_rebuild = False
+    
     if not os.path.exists(ASSET_HISTORY_FILE_PATH):
-        d4 = (date.today() - timedelta(days=28)).isoformat()
-        d3 = (date.today() - timedelta(days=21)).isoformat()
-        d2 = (date.today() - timedelta(days=14)).isoformat()
-        d1 = (date.today() - timedelta(days=7)).isoformat()
-        
-        demo_data = pd.DataFrame([
-            {"Date": d4, "Total_Assets": round(total_assets * 0.92), "Total_Liability": round(total_liability), "Stock_Value": round(stock_value * 0.90), "Net_Equity": round(net_equity * 0.93)},
-            {"Date": d3, "Total_Assets": round(total_assets * 0.94), "Total_Liability": round(total_liability), "Stock_Value": round(stock_value * 0.93), "Net_Equity": round(net_equity * 0.95)},
-            {"Date": d2, "Total_Assets": round(total_assets * 0.97), "Total_Liability": round(total_liability), "Stock_Value": round(stock_value * 0.96), "Net_Equity": round(net_equity * 0.97)},
-            {"Date": d1, "Total_Assets": round(total_assets * 0.99), "Total_Liability": round(total_liability), "Stock_Value": round(stock_value * 0.99), "Net_Equity": round(net_equity * 0.99)},
-            new_row
-        ])
-        demo_data.to_csv(ASSET_HISTORY_FILE_PATH, index=False)
-        return demo_data
-        
-    try:
-        df = pd.read_csv(ASSET_HISTORY_FILE_PATH)
-        # 🚀 健壯自癒機制：如果現存 CSV 損壞、為空、或者資料少於 5 筆，直接拋出例外進行完整重建！
-        if df.empty or len(df) < 5:
-            raise ValueError("Data incomplete, trigger rebuild.")
+        trigger_rebuild = True
+    else:
+        try:
+            df = pd.read_csv(ASSET_HISTORY_FILE_PATH)
+            # 🚀 健壯自癒核心 1：若為空、筆數少於 5 筆、或不重複日期數小於 5 筆 (防重疊)，無條件觸發重建！
+            if df.empty or len(df) < 5 or df['Date'].nunique() < 5:
+                trigger_rebuild = True
+            else:
+                # 🚀 健壯自癒核心 2：自動修復與剔除污染格式
+                updated_any = False
+                for idx_row in range(len(df)):
+                    curr_val = str(df.iloc[idx_row]['Date'])
+                    if " (預估)" in curr_val:
+                        df.iloc[idx_row, df.columns.get_loc('Date')] = curr_val.replace(" (預估)", "").strip()
+                        updated_any = True
+                if updated_any:
+                    df.to_csv(ASSET_HISTORY_FILE_PATH, index=False)
+        except Exception:
+            trigger_rebuild = True
             
-        # 🚀 自動修復被污染的舊 CSV 格式：將 Date 中的 " (預估)" 字眼徹底剔除，回歸純日期 YYYY-MM-DD
-        updated_any = False
-        for idx_row in range(len(df)):
-            curr_val = str(df.iloc[idx_row]['Date'])
-            if " (預估)" in curr_val:
-                df.iloc[idx_row, df.columns.get_loc('Date')] = curr_val.replace(" (預估)", "").strip()
-                updated_any = True
-        if updated_any:
-            df.to_csv(ASSET_HISTORY_FILE_PATH, index=False)
-            
-        last_date_str = str(df.iloc[-1]['Date'])
-        pure_date_str = last_date_str.split()[0]
-        last_date = datetime.strptime(pure_date_str, '%Y-%m-%d').date()
-        
-        # A. 如果「今天日期」已經存在於記錄中，無條件用當下最新資產負債數據覆蓋更新！
-        if today_str in df['Date'].values:
-            df.loc[df['Date'] == today_str, ["Total_Assets", "Total_Liability", "Stock_Value", "Net_Equity"]] = [
-                new_row["Total_Assets"], new_row["Total_Liability"], new_row["Stock_Value"], new_row["Net_Equity"]
-            ]
-            df.to_csv(ASSET_HISTORY_FILE_PATH, index=False)
-        else:
-            # B. 如果今天還不在記錄中，則判斷與最後一次記錄的時間差是否大於等於 7 天
-            days_diff = (date.today() - last_date).days
-            if days_diff >= 7:
-                df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-                df.to_csv(ASSET_HISTORY_FILE_PATH, index=False)
-    except Exception:
-        # 🛡️ 檔案不存在或資料毀損時，以當下比例自動重建 4 週歷史預估基底 + 今天真實數據
+    if trigger_rebuild:
+        # 重建 4 週前～ 1 週前的歷史預估基底 + 今天的真實行
         d4 = (date.today() - timedelta(days=28)).isoformat()
         d3 = (date.today() - timedelta(days=21)).isoformat()
         d2 = (date.today() - timedelta(days=14)).isoformat()
@@ -145,7 +120,30 @@ def track_weekly_assets(total_assets, total_liability, stock_value, net_equity):
             new_row
         ])
         df.to_csv(ASSET_HISTORY_FILE_PATH, index=False)
-    
+        return df
+
+    # 執行日常正常追加與覆蓋邏輯
+    try:
+        df = pd.read_csv(ASSET_HISTORY_FILE_PATH)
+        last_date_str = str(df.iloc[-1]['Date'])
+        pure_date_str = last_date_str.split()[0]
+        last_date = datetime.strptime(pure_date_str, '%Y-%m-%d').date()
+        
+        # A. 今日存在：覆蓋
+        if today_str in df['Date'].values:
+            df.loc[df['Date'] == today_str, ["Total_Assets", "Total_Liability", "Stock_Value", "Net_Equity"]] = [
+                new_row["Total_Assets"], new_row["Total_Liability"], new_row["Stock_Value"], new_row["Net_Equity"]
+            ]
+            df.to_csv(ASSET_HISTORY_FILE_PATH, index=False)
+        else:
+            # B. 今日不在：滿 7 天追加
+            days_diff = (date.today() - last_date).days
+            if days_diff >= 7:
+                df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+                df.to_csv(ASSET_HISTORY_FILE_PATH, index=False)
+    except Exception:
+        pass
+        
     return pd.read_csv(ASSET_HISTORY_FILE_PATH)
 
 
@@ -1558,7 +1556,7 @@ if hist_close is not None and not hist_close.empty:
                 gridcolor='rgba(128,128,128,0.15)',
                 tickformat=".0f"
             )
-            fig_trend.update_xaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.12)')
+            fig_trend.update_xaxes(type='category', showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.12)')
             st.plotly_chart(fig_trend, use_container_width=True)
         except Exception as e:
             st.error(f"無法繪製每週資產趨勢圖: {e}")
