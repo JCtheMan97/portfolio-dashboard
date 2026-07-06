@@ -110,15 +110,18 @@ def track_weekly_assets(total_assets, total_liability, stock_value, net_equity):
         pure_date_str = last_date_str.split()[0]
         last_date = datetime.strptime(pure_date_str, '%Y-%m-%d').date()
         
-        days_diff = (date.today() - last_date).days
-        if days_diff >= 7:
-            if today_str in df['Date'].values:
-                df.loc[df['Date'] == today_str, ["Total_Assets", "Total_Liability", "Stock_Value", "Net_Equity"]] = [
-                    new_row["Total_Assets"], new_row["Total_Liability"], new_row["Stock_Value"], new_row["Net_Equity"]
-                ]
-            else:
-                df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+        # A. 如果「今天日期」已經存在於記錄中，無條件用當下最新資產負債數據覆蓋更新！
+        if today_str in df['Date'].values:
+            df.loc[df['Date'] == today_str, ["Total_Assets", "Total_Liability", "Stock_Value", "Net_Equity"]] = [
+                new_row["Total_Assets"], new_row["Total_Liability"], new_row["Stock_Value"], new_row["Net_Equity"]
+            ]
             df.to_csv(ASSET_HISTORY_FILE_PATH, index=False)
+        else:
+            # B. 如果今天還不在記錄中，則判斷與最後一次記錄的時間差是否大於等於 7 天
+            days_diff = (date.today() - last_date).days
+            if days_diff >= 7:
+                df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+                df.to_csv(ASSET_HISTORY_FILE_PATH, index=False)
     except Exception:
         pass
     
