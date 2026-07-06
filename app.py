@@ -855,6 +855,30 @@ if st.sidebar.button("⚡ 強制清空快取並同步最新股價", use_containe
     st.sidebar.success("⏳ 快取已清空！正在向 Yahoo Finance 下載最新報價...")
     st.rerun()
 
+# 📥 數據備份與安全繼承下載專區
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 📥 數據備份與安全繼承")
+st.sidebar.caption("💡 由於 Streamlit Cloud 重新部署會以 GitHub 代碼覆蓋雲端，建議在 debug/修改代碼前，在此下載最新 CSV 覆蓋到您的本機專案目錄中，再一起推送到 GitHub，即可永久繼承歷史數據！")
+
+for label, path, filename in [
+    ("📁 下載最新持股 CSV", CSV_FILE_PATH, "portfolio_data.csv"),
+    ("📁 下載最新貸款 CSV", LOANS_FILE_PATH, "loans_data.csv"),
+    ("📈 下載每週資產歷史 CSV", ASSET_HISTORY_FILE_PATH, "asset_history.csv")
+]:
+    if os.path.exists(path):
+        try:
+            with open(path, 'r', encoding='utf-8') as f_csv:
+                csv_data = f_csv.read()
+            st.sidebar.download_button(
+                label=label,
+                data=csv_data,
+                file_name=filename,
+                mime="text/csv",
+                use_container_width=True
+            )
+        except Exception:
+            pass
+
 def get_default_csv_data():
     if os.path.exists(CSV_FILE_PATH):
         try:
