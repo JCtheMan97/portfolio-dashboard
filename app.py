@@ -19,7 +19,6 @@ except ImportError:
 import requests
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
-from bs4 import BeautifulSoup
 
 warnings.filterwarnings('ignore')
 
