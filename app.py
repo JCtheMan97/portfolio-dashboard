@@ -821,13 +821,19 @@ with st.sidebar.expander("🛠️ 進階模型設定"):
         format="%.3f"
     ) / 100.0
     
-    if st.button("🔄 重整快取數據"):
-        st.cache_data.clear()
-        st.success("快取已清除，重整中...")
+
 
 # ============================================================
 # Load and Verify CSV
 # ============================================================
+
+# ⚡ 突出顯示的強制清空快取同步股價按鈕，直接露在 Sidebar 最外層！
+st.sidebar.markdown("---")
+if st.sidebar.button("⚡ 強制清空快取並同步最新股價", use_container_width=True):
+    st.cache_data.clear()
+    st.sidebar.success("⏳ 快取已清空！正在向 Yahoo Finance 下載最新報價...")
+    st.rerun()
+
 def get_default_csv_data():
     if os.path.exists(CSV_FILE_PATH):
         try:
@@ -1258,7 +1264,7 @@ if hist_close is not None and not hist_close.empty:
                 use_container_width=True,
                 height=320
             )
-        st.caption(f"👉 今日投資組合總損益: **NT$ {total_portfolio_daily_pnl:+,.0f} ({total_portfolio_daily_return:+.2f}%)** | 今日大盤: **{twii_daily_return:+.2f}%**")
+        st.caption(f"👉 今日投資組合總損益: **NT$ {total_portfolio_daily_pnl:+,.0f} ({total_portfolio_daily_return:+.2f}%)** | 今日大盤: **{twii_daily_return:+.2f}%** (💡 註: 報價預設快取 15 分鐘。盤中若欲同步最新即時股價，請點選左側 Sidebar 最下方的【⚡ 強制清空快取並同步最新股價】按鈕)")
 
         # ------------------------------------------------------------
         # 【第二部分：資金與負債現狀】
