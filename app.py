@@ -83,10 +83,10 @@ def track_weekly_assets(total_assets, total_liability, stock_value, net_equity):
     }
     
     if not os.path.exists(ASSET_HISTORY_FILE_PATH):
-        d4 = (date.today() - timedelta(days=28)).isoformat() + " (預估)"
-        d3 = (date.today() - timedelta(days=21)).isoformat() + " (預估)"
-        d2 = (date.today() - timedelta(days=14)).isoformat() + " (預估)"
-        d1 = (date.today() - timedelta(days=7)).isoformat() + " (預估)"
+        d4 = (date.today() - timedelta(days=28)).isoformat()
+        d3 = (date.today() - timedelta(days=21)).isoformat()
+        d2 = (date.today() - timedelta(days=14)).isoformat()
+        d1 = (date.today() - timedelta(days=7)).isoformat()
         
         demo_data = pd.DataFrame([
             {"Date": d4, "Total_Assets": round(total_assets * 0.92), "Total_Liability": round(total_liability), "Stock_Value": round(stock_value * 0.90), "Net_Equity": round(net_equity * 0.93)},
@@ -100,13 +100,21 @@ def track_weekly_assets(total_assets, total_liability, stock_value, net_equity):
         
     try:
         df = pd.read_csv(ASSET_HISTORY_FILE_PATH)
-        if df.empty:
-            df = pd.DataFrame([new_row])
+        # 🚀 健壯自癒機制：如果現存 CSV 損壞、為空、或者資料少於 5 筆，直接拋出例外進行完整重建！
+        if df.empty or len(df) < 5:
+            raise ValueError("Data incomplete, trigger rebuild.")
+            
+        # 🚀 自動修復被污染的舊 CSV 格式：將 Date 中的 " (預估)" 字眼徹底剔除，回歸純日期 YYYY-MM-DD
+        updated_any = False
+        for idx_row in range(len(df)):
+            curr_val = str(df.iloc[idx_row]['Date'])
+            if " (預估)" in curr_val:
+                df.iloc[idx_row, df.columns.get_loc('Date')] = curr_val.replace(" (預估)", "").strip()
+                updated_any = True
+        if updated_any:
             df.to_csv(ASSET_HISTORY_FILE_PATH, index=False)
-            return df
             
         last_date_str = str(df.iloc[-1]['Date'])
-        # 🚀 支援帶有 " (預估)" 尾綴的歷史日期，以空格分割取出 YYYY-MM-DD 純日期部分
         pure_date_str = last_date_str.split()[0]
         last_date = datetime.strptime(pure_date_str, '%Y-%m-%d').date()
         
@@ -123,7 +131,20 @@ def track_weekly_assets(total_assets, total_liability, stock_value, net_equity):
                 df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
                 df.to_csv(ASSET_HISTORY_FILE_PATH, index=False)
     except Exception:
-        pass
+        # 🛡️ 檔案不存在或資料毀損時，以當下比例自動重建 4 週歷史預估基底 + 今天真實數據
+        d4 = (date.today() - timedelta(days=28)).isoformat()
+        d3 = (date.today() - timedelta(days=21)).isoformat()
+        d2 = (date.today() - timedelta(days=14)).isoformat()
+        d1 = (date.today() - timedelta(days=7)).isoformat()
+        
+        df = pd.DataFrame([
+            {"Date": d4, "Total_Assets": round(total_assets * 0.92), "Total_Liability": round(total_liability), "Stock_Value": round(stock_value * 0.90), "Net_Equity": round(net_equity * 0.93)},
+            {"Date": d3, "Total_Assets": round(total_assets * 0.94), "Total_Liability": round(total_liability), "Stock_Value": round(stock_value * 0.93), "Net_Equity": round(net_equity * 0.95)},
+            {"Date": d2, "Total_Assets": round(total_assets * 0.97), "Total_Liability": round(total_liability), "Stock_Value": round(stock_value * 0.96), "Net_Equity": round(net_equity * 0.97)},
+            {"Date": d1, "Total_Assets": round(total_assets * 0.99), "Total_Liability": round(total_liability), "Stock_Value": round(stock_value * 0.99), "Net_Equity": round(net_equity * 0.99)},
+            new_row
+        ])
+        df.to_csv(ASSET_HISTORY_FILE_PATH, index=False)
     
     return pd.read_csv(ASSET_HISTORY_FILE_PATH)
 
@@ -1460,6 +1481,7 @@ if hist_close is not None and not hist_close.empty:
         st.markdown("---")
         st.markdown("### 📈 【每週資產歷史趨勢折線圖】")
         try:
+            today_str = date.today().isoformat()
             total_assets_calc = total_stock_market_value + current_cash
             total_liability_calc = sum(float(l['principal']) if 'principal' in l else float(l.get('Principal', 0.0)) for l in loans)
             stock_value_calc = total_stock_market_value
@@ -1477,30 +1499,39 @@ if hist_close is not None and not hist_close.empty:
             stock_w = hist_df['Stock_Value'] / 10000
             liability_w = hist_df['Total_Liability'] / 10000
             
+            # 建立用於 X 軸顯示的標籤 (CSV 保持純日期，圖表上動態將前 4 筆歷史預估資料標記 " (預估)")
+            x_labels = []
+            for idx_row, row_val in enumerate(hist_df['Date']):
+                date_str = str(row_val).replace(" (預估)", "").strip()
+                if idx_row < 4 and date_str != today_str:
+                    x_labels.append(f"{date_str} (預估)")
+                else:
+                    x_labels.append(date_str)
+            
             fig_trend = go.Figure()
             fig_trend.add_trace(go.Bar(
-                x=hist_df['Date'], y=assets_w, 
+                x=x_labels, y=assets_w, 
                 name='總資產 (Total Assets)', 
                 marker_color='#38bdf8',
                 text=[f"{val:.0f}萬" for val in assets_w],
                 textposition='outside'
             ))
             fig_trend.add_trace(go.Bar(
-                x=hist_df['Date'], y=equity_w, 
+                x=x_labels, y=equity_w, 
                 name='資產淨值 (Net Equity)', 
                 marker_color='#10b981',
                 text=[f"{val:.0f}萬" for val in equity_w],
                 textposition='outside'
             ))
             fig_trend.add_trace(go.Bar(
-                x=hist_df['Date'], y=stock_w, 
+                x=x_labels, y=stock_w, 
                 name='股票庫存 (Stock Value)', 
                 marker_color='#fb7185',
                 text=[f"{val:.0f}萬" for val in stock_w],
                 textposition='outside'
             ))
             fig_trend.add_trace(go.Bar(
-                x=hist_df['Date'], y=liability_w, 
+                x=x_labels, y=liability_w, 
                 name='總負債 (Liabilities)', 
                 marker_color='#f59e0b',
                 text=[f"{val:.0f}萬" for val in liability_w],
@@ -1518,14 +1549,13 @@ if hist_close is not None and not hist_close.empty:
                 margin=dict(t=40, b=30, l=10, r=10),
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
             )
-            # 自動刻度聚焦並設定細緻網格 (不強制從0開始以放大波動，且每 20 萬畫一條精細刻度線)
+            # 自動刻度聚焦並設定細緻網格 (不強制從0開始以放大波動，移除 dtick 限制讓 Plotly 自動呈現最美觀刻度)
             fig_trend.update_yaxes(
                 autorange=True,
                 rangemode='normal',
                 showgrid=True, 
                 gridwidth=1, 
                 gridcolor='rgba(128,128,128,0.15)',
-                dtick=20,  # 20 萬為一個間距，刻度密而精細
                 tickformat=".0f"
             )
             fig_trend.update_xaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.12)')
@@ -1622,21 +1652,22 @@ if hist_close is not None and not hist_close.empty:
             return 0 <= delta_days <= 30
 
         async def fetch_stock_news_worker(context, stock_code, semaphore, today_date_obj, current_tw_year_str):
-            """獨立的非同步工兵：具備『新舊雙站自動切換』與自動重試機制，確保 100% 抓取"""
             async with semaphore:
                 urls = [
                     f"https://mops.twse.com.tw/mops/#/web/t146sb05?companyId={stock_code}",
                     f"https://mops.twse.com.tw/mops/#/web/t146sb05?companyId={stock_code}",
                     f"https://mopsov.twse.com.tw/mops/web/t146sb05?companyId={stock_code}"
                 ]
+                
                 max_retries = len(urls)
+                
                 for attempt in range(1, max_retries + 1):
                     target_url = urls[attempt - 1]
-                    is_backup_site = "mopsov" in target_url
                     found_news = []
                     page = await context.new_page()
                     try:
                         await page.goto(target_url, wait_until="domcontentloaded", timeout=25000)
+                        
                         try:
                             await page.wait_for_function(f"""
                                 () => {{
@@ -1646,28 +1677,36 @@ if hist_close is not None and not hist_close.empty:
                             """, timeout=6000)
                         except:
                             pass
+                            
                         await page.wait_for_timeout(450)
+                        
                         page_text = await page.evaluate("() => document.body.innerText")
-                        lines_text = page_text.split('\n')
-                        has_valid_table_data = any(f"{current_tw_year_str}/" in line or "暫無數據" in line or "無資料" in line for line in lines_text)
+                        lines = page_text.split('\n')
+                        
+                        has_valid_table_data = any(f"{current_tw_year_str}/" in line or "暫無數據" in line or "無資料" in line for line in lines)
+                        
                         if not has_valid_table_data and attempt < max_retries:
                             await page.close()
                             await asyncio.sleep(0.8 * attempt)
                             continue
-                        for line in lines_text:
+                        
+                        for line in lines:
                             clean_line = line.strip()
                             if not clean_line or "詳細資料" in clean_line or "主旨" in clean_line:
                                 continue
                             if f"{current_tw_year_str}/" in clean_line and len(clean_line) > 10:
                                 if "請輸入" in clean_line or "公司代碼" in clean_line or "歷史查詢" in clean_line:
                                     continue
+                                
                                 date_obj = parse_to_date_object(clean_line)
                                 if date_obj and is_within_last_30_days(date_obj):
                                     found_news.append({
                                         "text": clean_line,
                                         "is_today": (date_obj == today_date_obj)
                                     })
+                                    
                         await page.close()
+                        
                         seen = set()
                         unique_news = []
                         for item in found_news:
@@ -1803,7 +1842,6 @@ if hist_close is not None and not hist_close.empty:
                     unique_news.append(item)
             return unique_news
 
-
         async def run_scraper(stocks_list, status_placeholder, progress_bar):
             use_playwright = True
             browser = None
@@ -1844,7 +1882,6 @@ if hist_close is not None and not hist_close.empty:
                         status_placeholder.write(f"⏳ **[Playwright 引擎]** 已完成掃描個股：{get_stock_name_by_code(stock)} ({stock}) (進度: {i+1}/{total})")
                         progress_bar.progress(percent)
                 except Exception as run_err:
-                    # 執行期出錯也進入降級
                     use_playwright = False
                 finally:
                     try:
@@ -1920,22 +1957,12 @@ if hist_close is not None and not hist_close.empty:
                     else:
                         clean_stocks.append(stock)
                 
-                # 專屬 CSS：將重訊掃描結果儀表板調整為無背景、無黑底、字體稍大的卡片樣式
-                # 🚀 3. 高級儀表板卡片 (與第一分頁相同風格，透明無黑底)
-                st.markdown(f"""
-                    <div style="display: flex; gap: 15px; margin-bottom: 20px; margin-top: 10px;">
-                        <div style="flex: 1; background: rgba(128, 128, 128, 0.06); border-radius: 8px; padding: 15px; border: 1px solid rgba(128, 128, 128, 0.12); box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
-                            <span style="font-size: 13px; color: var(--text-color); opacity: 0.75; font-weight: 500;">📋 近 30 天重要訊息總數</span><br>
-                            <span style="font-size: 26px; font-weight: bold; color: #ff4b4b;">{total_alerts} 筆</span>
-                            <span style="font-size: 12px; margin-left: 8px; color: {'#ff4b4b' if total_alerts > 0 else '#00cc66'}">{'🔴 警告' if total_alerts > 0 else '🟢 安全'}</span>
-                        </div>
-                        <div style="flex: 1; background: rgba(128, 128, 128, 0.06); border-radius: 8px; padding: 15px; border: 1px solid rgba(128, 128, 128, 0.12); box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
-                            <span style="font-size: 13px; color: var(--text-color); opacity: 0.75; font-weight: 500;">🔥 今日最新即時發布</span><br>
-                            <span style="font-size: 26px; font-weight: bold; color: #ffaa00;">{today_alerts} 筆</span>
-                            <span style="font-size: 12px; margin-left: 8px; color: {'#ffaa00' if today_alerts > 0 else '#888888'}">{'🔥 今日' if today_alerts > 0 else '無今日發布'}</span>
-                        </div>
-                    </div>
-                """, unsafe_allow_html=True)
+                # Show Tab 2 summary
+                col_sum1, col_sum2 = st.columns(2)
+                with col_sum1:
+                    render_metric_card("近 30 天重要訊息總數", f"{total_alerts} 筆", "30天內公開觀測站重大訊息總計", "#ef4444" if total_alerts > 0 else "#10b981")
+                with col_sum2:
+                    render_metric_card("今日最新即時發布", f"{today_alerts} 筆", "今日新公布之即時重訊", "#ef4444" if today_alerts > 0 else "#10b981")
                 
                 st.markdown("---")
                 
@@ -1957,37 +1984,15 @@ if hist_close is not None and not hist_close.empty:
                             expander_title = f"🔥 【{stock_name} ({stock})】 今日最新即時重大訊息！(共 {len(news_list)} 筆)"
                             
                         with st.expander(expander_title, expanded=True):
-                            # 按照日期從最新到最舊排序重訊
-                            news_list_sorted = sorted(
-                                news_list,
-                                key=lambda x: parse_to_date_object(x["text"].split()[0]) or date.min,
-                                reverse=True
-                            )
-                            for news_item in news_list_sorted:
+                            for news_item in news_list:
                                 if news_item["is_today"]:
-                                    st.markdown(f"""
-                                        <div style="padding: 12px; margin-bottom: 8px; background: rgba(255, 75, 75, 0.05); border-left: 4px solid #d9383a; border-radius: 6px; border: 1px solid rgba(255, 75, 75, 0.15);">
-                                            <span style="color: #d9383a; font-weight: bold; font-size: 13px; margin-right: 8px;">🔥【今日即時】</span>
-                                            <span style="color: var(--text-color); font-size: 14px; font-family: sans-serif; font-weight: 500;">{news_item['text']}</span>
-                                        </div>
-                                    """, unsafe_allow_html=True)
+                                    st.markdown(f"<div style='color:#ef4444; font-weight:bold; padding: 4px 0;'>🔥 [今日即時] {news_item['text']}</div>", unsafe_allow_html=True)
                                 else:
-                                    st.markdown(f"""
-                                        <div style="padding: 12px; margin-bottom: 8px; background: rgba(128, 128, 128, 0.03); border-left: 4px solid #b58900; border-radius: 6px; border: 1px solid rgba(128, 128, 128, 0.08);">
-                                            <span style="color: #b58900; font-weight: bold; font-size: 13px; margin-right: 8px;">• 歷史重訊</span>
-                                            <span style="color: var(--text-color); font-size: 14px; font-family: sans-serif;">{news_item['text']}</span>
-                                        </div>
-                                    """, unsafe_allow_html=True)
+                                    st.markdown(f"<div style='color:gray; padding: 2px 0;'>• {news_item['text']}</div>", unsafe_allow_html=True)
                 
                 if clean_stocks:
-                    clean_displays_html = "".join([f"<span style='display: inline-block; background: rgba(0, 204, 102, 0.08); color: #00994d; border: 1px solid rgba(0, 204, 102, 0.2); border-radius: 20px; padding: 4px 12px; margin: 4px; font-size: 13px; font-weight: 500;'>✅ {get_stock_name_by_code(s)} ({s})</span>" for s in clean_stocks])
+                    clean_displays = [f"{get_stock_name_by_code(s)} ({s})" for s in clean_stocks]
                     with st.expander(f"✅ 近一個月內無重訊個股 (共 {len(clean_stocks)} 檔)", expanded=False):
-                        st.markdown(f"""
-                            <div style="padding: 10px; background: rgba(255,255,255,0.01); border-radius: 8px; border: 1px dashed rgba(255,255,255,0.05); display: flex; flex-wrap: wrap;">
-                                {clean_displays_html}
-                            </div>
-                        """, unsafe_allow_html=True)
-                
+                        st.write(", ".join(clean_displays))
+                        
                 st.success("🎉 重訊掃描任務精準執行完成！")
-else:
-    st.info("ℹ️ 無法載入歷史報價，請檢查代號格式正確，且 Yahoo Finance 網路連線正常。")
