@@ -1,3 +1,4 @@
+from bs4 import BeautifulSoup
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -5,11 +6,8 @@ import numpy as np
 import plotly.graph_objects as go
 from datetime import datetime, timedelta, date
 import os
-import html
 import warnings
 import re
-import threading
-import asyncio
 try:
     import zoneinfo
     TW_TZ = zoneinfo.ZoneInfo("Asia/Taipei")
@@ -17,9 +15,6 @@ except ImportError:
     from datetime import timezone
     TW_TZ = timezone(timedelta(hours=8))
 import requests
-from bs4 import BeautifulSoup
-from playwright.async_api import async_playwright
-from bs4 import BeautifulSoup
 
 warnings.filterwarnings('ignore')
 
@@ -83,10 +78,10 @@ def track_weekly_assets(total_assets, total_liability, stock_value, net_equity):
     }
     
     if not os.path.exists(ASSET_HISTORY_FILE_PATH):
-        d4 = (date.today() - timedelta(days=28)).isoformat() + " (預估)"
-        d3 = (date.today() - timedelta(days=21)).isoformat() + " (預估)"
-        d2 = (date.today() - timedelta(days=14)).isoformat() + " (預估)"
-        d1 = (date.today() - timedelta(days=7)).isoformat() + " (預估)"
+        d4 = (date.today() - timedelta(days=28)).isoformat()
+        d3 = (date.today() - timedelta(days=21)).isoformat()
+        d2 = (date.today() - timedelta(days=14)).isoformat()
+        d1 = (date.today() - timedelta(days=7)).isoformat()
         
         demo_data = pd.DataFrame([
             {"Date": d4, "Total_Assets": round(total_assets * 0.92), "Total_Liability": round(total_liability), "Stock_Value": round(stock_value * 0.90), "Net_Equity": round(net_equity * 0.93)},
@@ -100,13 +95,21 @@ def track_weekly_assets(total_assets, total_liability, stock_value, net_equity):
         
     try:
         df = pd.read_csv(ASSET_HISTORY_FILE_PATH)
-        if df.empty:
-            df = pd.DataFrame([new_row])
+        # 🚀 健壯自癒機制：如果現存 CSV 損壞、為空、或者資料少於 5 筆，直接拋出例外進行完整重建！
+        if df.empty or len(df) < 5:
+            raise ValueError("Data incomplete, trigger rebuild.")
+            
+        # 🚀 自動修復被污染的舊 CSV 格式：將 Date 中的 " (預估)" 字眼徹底剔除，回歸純日期 YYYY-MM-DD
+        updated_any = False
+        for idx_row in range(len(df)):
+            curr_val = str(df.iloc[idx_row]['Date'])
+            if " (預估)" in curr_val:
+                df.iloc[idx_row, df.columns.get_loc('Date')] = curr_val.replace(" (預估)", "").strip()
+                updated_any = True
+        if updated_any:
             df.to_csv(ASSET_HISTORY_FILE_PATH, index=False)
-            return df
             
         last_date_str = str(df.iloc[-1]['Date'])
-        # 🚀 支援帶有 " (預估)" 尾綴的歷史日期，以空格分割取出 YYYY-MM-DD 純日期部分
         pure_date_str = last_date_str.split()[0]
         last_date = datetime.strptime(pure_date_str, '%Y-%m-%d').date()
         
@@ -123,7 +126,20 @@ def track_weekly_assets(total_assets, total_liability, stock_value, net_equity):
                 df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
                 df.to_csv(ASSET_HISTORY_FILE_PATH, index=False)
     except Exception:
-        pass
+        # 🛡️ 檔案不存在或資料毀損時，以當下比例自動重建 4 週歷史預估基底 + 今天真實數據
+        d4 = (date.today() - timedelta(days=28)).isoformat()
+        d3 = (date.today() - timedelta(days=21)).isoformat()
+        d2 = (date.today() - timedelta(days=14)).isoformat()
+        d1 = (date.today() - timedelta(days=7)).isoformat()
+        
+        df = pd.DataFrame([
+            {"Date": d4, "Total_Assets": round(total_assets * 0.92), "Total_Liability": round(total_liability), "Stock_Value": round(stock_value * 0.90), "Net_Equity": round(net_equity * 0.93)},
+            {"Date": d3, "Total_Assets": round(total_assets * 0.94), "Total_Liability": round(total_liability), "Stock_Value": round(stock_value * 0.93), "Net_Equity": round(net_equity * 0.95)},
+            {"Date": d2, "Total_Assets": round(total_assets * 0.97), "Total_Liability": round(total_liability), "Stock_Value": round(stock_value * 0.96), "Net_Equity": round(net_equity * 0.97)},
+            {"Date": d1, "Total_Assets": round(total_assets * 0.99), "Total_Liability": round(total_liability), "Stock_Value": round(stock_value * 0.99), "Net_Equity": round(net_equity * 0.99)},
+            new_row
+        ])
+        df.to_csv(ASSET_HISTORY_FILE_PATH, index=False)
     
     return pd.read_csv(ASSET_HISTORY_FILE_PATH)
 
@@ -1460,6 +1476,7 @@ if hist_close is not None and not hist_close.empty:
         st.markdown("---")
         st.markdown("### 📈 【每週資產歷史趨勢折線圖】")
         try:
+            today_str = date.today().isoformat()
             total_assets_calc = total_stock_market_value + current_cash
             total_liability_calc = sum(float(l['principal']) if 'principal' in l else float(l.get('Principal', 0.0)) for l in loans)
             stock_value_calc = total_stock_market_value
@@ -1477,30 +1494,39 @@ if hist_close is not None and not hist_close.empty:
             stock_w = hist_df['Stock_Value'] / 10000
             liability_w = hist_df['Total_Liability'] / 10000
             
+            # 建立用於 X 軸顯示的標籤 (CSV 保持純日期，圖表上動態將前 4 筆歷史預估資料標記 " (預估)")
+            x_labels = []
+            for idx_row, row_val in enumerate(hist_df['Date']):
+                date_str = str(row_val).replace(" (預估)", "").strip()
+                if idx_row < 4 and date_str != today_str:
+                    x_labels.append(f"{date_str} (預估)")
+                else:
+                    x_labels.append(date_str)
+            
             fig_trend = go.Figure()
             fig_trend.add_trace(go.Bar(
-                x=hist_df['Date'], y=assets_w, 
+                x=x_labels, y=assets_w, 
                 name='總資產 (Total Assets)', 
                 marker_color='#38bdf8',
                 text=[f"{val:.0f}萬" for val in assets_w],
                 textposition='outside'
             ))
             fig_trend.add_trace(go.Bar(
-                x=hist_df['Date'], y=equity_w, 
+                x=x_labels, y=equity_w, 
                 name='資產淨值 (Net Equity)', 
                 marker_color='#10b981',
                 text=[f"{val:.0f}萬" for val in equity_w],
                 textposition='outside'
             ))
             fig_trend.add_trace(go.Bar(
-                x=hist_df['Date'], y=stock_w, 
+                x=x_labels, y=stock_w, 
                 name='股票庫存 (Stock Value)', 
                 marker_color='#fb7185',
                 text=[f"{val:.0f}萬" for val in stock_w],
                 textposition='outside'
             ))
             fig_trend.add_trace(go.Bar(
-                x=hist_df['Date'], y=liability_w, 
+                x=x_labels, y=liability_w, 
                 name='總負債 (Liabilities)', 
                 marker_color='#f59e0b',
                 text=[f"{val:.0f}萬" for val in liability_w],
@@ -1518,14 +1544,13 @@ if hist_close is not None and not hist_close.empty:
                 margin=dict(t=40, b=30, l=10, r=10),
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
             )
-            # 自動刻度聚焦並設定細緻網格 (不強制從0開始以放大波動，且每 20 萬畫一條精細刻度線)
+            # 自動刻度聚焦並設定細緻網格 (不強制從0開始以放大波動，移除 dtick 限制讓 Plotly 自動呈現最美觀刻度)
             fig_trend.update_yaxes(
                 autorange=True,
                 rangemode='normal',
                 showgrid=True, 
                 gridwidth=1, 
                 gridcolor='rgba(128,128,128,0.15)',
-                dtick=20,  # 20 萬為一個間距，刻度密而精細
                 tickformat=".0f"
             )
             fig_trend.update_xaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.12)')
@@ -1620,67 +1645,6 @@ if hist_close is not None and not hist_close.empty:
             today = date.today()
             delta_days = (today - target_date).days
             return 0 <= delta_days <= 30
-
-        async def fetch_stock_news_worker(context, stock_code, semaphore, today_date_obj, current_tw_year_str):
-            """獨立的非同步工兵：具備『新舊雙站自動切換』與自動重試機制，確保 100% 抓取"""
-            async with semaphore:
-                urls = [
-                    f"https://mops.twse.com.tw/mops/#/web/t146sb05?companyId={stock_code}",
-                    f"https://mops.twse.com.tw/mops/#/web/t146sb05?companyId={stock_code}",
-                    f"https://mopsov.twse.com.tw/mops/web/t146sb05?companyId={stock_code}"
-                ]
-                max_retries = len(urls)
-                for attempt in range(1, max_retries + 1):
-                    target_url = urls[attempt - 1]
-                    is_backup_site = "mopsov" in target_url
-                    found_news = []
-                    page = await context.new_page()
-                    try:
-                        await page.goto(target_url, wait_until="domcontentloaded", timeout=25000)
-                        try:
-                            await page.wait_for_function(f"""
-                                () => {{
-                                    const tableText = document.querySelector('.el-table, table')?.innerText || '';
-                                    return tableText.includes('{current_tw_year_str}/') || tableText.includes('暫無數據') || tableText.includes('無資料');
-                                }}
-                            """, timeout=6000)
-                        except:
-                            pass
-                        await page.wait_for_timeout(450)
-                        page_text = await page.evaluate("() => document.body.innerText")
-                        lines_text = page_text.split('\n')
-                        has_valid_table_data = any(f"{current_tw_year_str}/" in line or "暫無數據" in line or "無資料" in line for line in lines_text)
-                        if not has_valid_table_data and attempt < max_retries:
-                            await page.close()
-                            await asyncio.sleep(0.8 * attempt)
-                            continue
-                        for line in lines_text:
-                            clean_line = line.strip()
-                            if not clean_line or "詳細資料" in clean_line or "主旨" in clean_line:
-                                continue
-                            if f"{current_tw_year_str}/" in clean_line and len(clean_line) > 10:
-                                if "請輸入" in clean_line or "公司代碼" in clean_line or "歷史查詢" in clean_line:
-                                    continue
-                                date_obj = parse_to_date_object(clean_line)
-                                if date_obj and is_within_last_30_days(date_obj):
-                                    found_news.append({
-                                        "text": clean_line,
-                                        "is_today": (date_obj == today_date_obj)
-                                    })
-                        await page.close()
-                        seen = set()
-                        unique_news = []
-                        for item in found_news:
-                            if item["text"] not in seen:
-                                seen.add(item["text"])
-                                unique_news.append(item)
-                        return stock_code, unique_news
-                    except Exception:
-                        await page.close()
-                        if attempt == max_retries:
-                            return stock_code, []
-                        await asyncio.sleep(1.5)
-                return stock_code, []
 
         def fetch_stock_news_requests_fallback(stock_code):
             """免瀏覽器核心的 HTTP 輕量級綜合重訊與除權息爬蟲 (當 Playwright 崩潰時自動降級備援使用)"""
@@ -1804,105 +1768,24 @@ if hist_close is not None and not hist_close.empty:
             return unique_news
 
 
-        async def run_scraper(stocks_list, status_placeholder, progress_bar):
-            use_playwright = True
-            browser = None
-            p = None
-            try:
-                # 嘗試啟動 Playwright 引擎
-                p = await async_playwright().start()
-                browser = await p.chromium.launch(headless=True)
-            except Exception as e:
-                use_playwright = False
-                status_placeholder.info("⚡ 偵測到雲端無頭環境，已自動啟用【備援 HTTP 輕量級重訊極速引擎】安全掃描中...")
-                if p:
-                    try:
-                        await p.stop()
-                    except:
-                        pass
-            
-            results = []
-            total = len(stocks_list)
-            
-            if use_playwright and browser:
-                try:
-                    context = await browser.new_context(
-                        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                        viewport={"width": 1400, "height": 900}
-                    )
-                    
-                    semaphore = asyncio.Semaphore(3)
-                    today_date_obj = date.today()
-                    current_tw_year_str = str(today_date_obj.year - 1911)
-                    
-                    tasks = [fetch_stock_news_worker(context, stock, semaphore, today_date_obj, current_tw_year_str) for stock in stocks_list]
-                    
-                    for i, coro in enumerate(asyncio.as_completed(tasks)):
-                        stock, news = await coro
-                        results.append((stock, news))
-                        percent = (i + 1) / total
-                        status_placeholder.write(f"⏳ **[Playwright 引擎]** 已完成掃描個股：{get_stock_name_by_code(stock)} ({stock}) (進度: {i+1}/{total})")
-                        progress_bar.progress(percent)
-                except Exception as run_err:
-                    # 執行期出錯也進入降級
-                    use_playwright = False
-                finally:
-                    try:
-                        await browser.close()
-                    except:
-                        pass
-                    try:
-                        await p.stop()
-                    except:
-                        pass
-            
-            # 若 Playwright 啟動或執行失敗，則用 Fallback 爬蟲抓取
-            if not use_playwright:
-                for i, stock in enumerate(stocks_list):
-                    news = fetch_stock_news_requests_fallback(stock)
-                    results.append((stock, news))
-                    percent = (i + 1) / total
-                    status_placeholder.write(f"⏳ **[HTTP 備援引擎]** 已完成掃描個股：{get_stock_name_by_code(stock)} ({stock}) (進度: {i+1}/{total})")
-                    progress_bar.progress(percent)
-                    await asyncio.sleep(0.3)
-                    
-            return results
-
-        def run_async(coro):
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            if loop.is_running():
-                result = [None]
-                exception = [None]
-                def worker():
-                    try:
-                        new_loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(new_loop)
-                        result[0] = new_loop.run_until_complete(coro)
-                    except Exception as e:
-                        exception[0] = e
-                    finally:
-                        new_loop.close()
-                t = threading.Thread(target=worker)
-                t.start()
-                t.join()
-                if exception[0]:
-                    raise exception[0]
-                return result[0]
-            else:
-                return loop.run_until_complete(coro)
-
         if st.button("📡 啟動即時公開資訊觀測站重訊掃描"):
             if not my_stocks_dynamic:
                 st.warning("⚠️ 庫存中無個股，無法執行掃描任務。")
             else:
                 status_placeholder = st.empty()
                 progress_bar = st.progress(0.0)
-                with st.spinner("⚡ 正在並行發動非同步陣列爬蟲，全速觀測中..."):
-                    results = run_async(run_scraper(my_stocks_dynamic, status_placeholder, progress_bar))
+                results = []
+                total = len(my_stocks_dynamic)
+                
+                with st.spinner("⚡ 正在發動 HTTP 輕量級重訊極速引擎，安全掃描中..."):
+                    for i, stock in enumerate(my_stocks_dynamic):
+                        # 呼叫純同步的 requests 備援爬蟲，穩定度高且速度極快！
+                        news = fetch_stock_news_requests_fallback(stock)
+                        results.append((stock, news))
+                        percent = (i + 1) / total
+                        status_placeholder.write(f"⏳ **[HTTP 備援引擎]** 已完成掃描個股：{get_stock_name_by_code(stock)} ({stock}) (進度: {i+1}/{total})")
+                        progress_bar.progress(percent)
+                        time.sleep(0.15) # 輕微延遲防止過載
                 
                 progress_bar.empty()
                 status_placeholder.empty()
