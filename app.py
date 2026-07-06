@@ -1630,7 +1630,7 @@ if hist_close is not None and not hist_close.empty:
     # Tab 2: Live MOPS Alerts Scraper Integration
     # ============================================================
     with tab2:
-        st.markdown("### 📡 0050 領頭羊基本面預警衛星 v22.4")
+        st.markdown("### 📡 JC投資組合基本面預警衛星")
 
         
         active_tickers = active_stock_df['Ticker'].tolist()
@@ -1978,12 +1978,28 @@ if hist_close is not None and not hist_close.empty:
                     else:
                         clean_stocks.append(stock)
                 
-                # Show Tab 2 summary
+                # Show Tab 2 summary (Custom linear-gradient HTML cards to distinguish visual layers)
                 col_sum1, col_sum2 = st.columns(2)
                 with col_sum1:
-                    render_metric_card("近 30 天重要訊息總數", f"{total_alerts} 筆", "30天內公開觀測站重大訊息總計", "#ef4444" if total_alerts > 0 else "#10b981")
+                    st.markdown(f"""
+                    <div style='background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+                                padding: 22px 24px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.1);
+                                color: white; box-shadow: 0 4px 15px rgba(0,0,0,0.15); margin-bottom: 12px;'>
+                        <div style='font-size: 13.5px; font-weight: 700; opacity: 0.85;'>近 30 天重要訊息總數</div>
+                        <div style='font-size: 32px; font-weight: 800; margin: 8px 0; color: #63b3ed;'>{total_alerts} 筆</div>
+                        <div style='font-size: 12px; opacity: 0.75;'>30天內公開觀測站重大訊息總計</div>
+                    </div>
+                    """, unsafe_allow_html=True)
                 with col_sum2:
-                    render_metric_card("今日最新即時發布", f"{today_alerts} 筆", "今日新公布之即時重訊", "#ef4444" if today_alerts > 0 else "#10b981")
+                    st.markdown(f"""
+                    <div style='background: linear-gradient(135deg, #ff416c 0%, #ff4b2b 100%);
+                                padding: 22px 24px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.1);
+                                color: white; box-shadow: 0 4px 15px rgba(0,0,0,0.15); margin-bottom: 12px;'>
+                        <div style='font-size: 13.5px; font-weight: 700; opacity: 0.85;'>今日最新即時發布</div>
+                        <div style='font-size: 32px; font-weight: 800; margin: 8px 0; color: #ffffff;'>{today_alerts} 筆</div>
+                        <div style='font-size: 12px; opacity: 0.75;'>今日新公布之即時重訊</div>
+                    </div>
+                    """, unsafe_allow_html=True)
                 
                 st.markdown("---")
                 
