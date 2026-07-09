@@ -172,9 +172,42 @@ def load_stock_names():
     names = {"REALIZED_CASH": "已實現現金"}
     
     txt_path = os.path.join(os.path.dirname(__file__), 'stocks_list.txt')
+    
+    # 若檔案不存在或為空，自動自官方 API 抓取所有上市與上櫃股票代號並建立備援 stocks_list.txt，確保獨立運行
+    if not os.path.exists(txt_path) or os.path.getsize(txt_path) == 0:
+        try:
+            fetched_dict = {}
+            # 1. 獲取上市公司 (TWSE)
+            url_twse = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
+            r_twse = requests.get(url_twse, timeout=10)
+            if r_twse.status_code == 200:
+                for item in r_twse.json():
+                    code = item.get("Code", "").strip()
+                    name = item.get("Name", "").strip()
+                    if code and name and code.isdigit() and len(code) == 4:
+                        fetched_dict[f"{code}.TW"] = name
+            
+            # 2. 獲取上櫃公司 (TPEx)
+            url_tpex = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes"
+            r_tpex = requests.get(url_tpex, timeout=10)
+            if r_tpex.status_code == 200:
+                for item in r_tpex.json():
+                    code = item.get("SecuritiesCompanyCode", "").strip()
+                    name = item.get("CompanyName", "").strip()
+                    if code and name and code.isdigit() and len(code) == 4:
+                        fetched_dict[f"{code}.TWO"] = name
+            
+            if fetched_dict:
+                # 寫入 stocks_list.txt (使用帶有 BOM 的 UTF-8-sig)
+                with open(txt_path, "w", encoding="utf-8-sig") as f:
+                    for code, name in sorted(fetched_dict.items()):
+                        f.write(f"{code},{name}\n")
+        except Exception:
+            pass
+
     if os.path.exists(txt_path):
         try:
-            with open(txt_path, 'r', encoding='utf-8') as f:
+            with open(txt_path, 'r', encoding='utf-8-sig') as f:
                 for line in f:
                     line = line.strip()
                     if not line or line.startswith('#'):
@@ -1696,7 +1729,8 @@ if hist_close is not None and not hist_close.empty:
                                 if date_obj and is_within_last_30_days(date_obj):
                                     found_news.append({
                                         "text": clean_line,
-                                        "is_today": (date_obj == today_date_obj)
+                                        "is_today": (date_obj == today_date_obj),
+                                        "date": date_obj
                                     })
                                     
                         await page.close()
@@ -1787,7 +1821,8 @@ if hist_close is not None and not hist_close.empty:
                             if date_obj and is_within_last_30_days(date_obj):
                                 found_news.append({
                                     "text": formatted,
-                                    "is_today": (date_obj == today_date_obj)
+                                    "is_today": (date_obj == today_date_obj),
+                                    "date": date_obj
                                 })
                                 has_data = True
                         elif len(dates) == 3:
@@ -1796,7 +1831,8 @@ if hist_close is not None and not hist_close.empty:
                             if date_obj and is_within_last_30_days(date_obj):
                                 found_news.append({
                                     "text": formatted,
-                                    "is_today": (date_obj == today_date_obj)
+                                    "is_today": (date_obj == today_date_obj),
+                                    "date": date_obj
                                 })
                                 has_data = True
                         elif f"{current_tw_year_str}/" in clean and len(clean) > 10:
@@ -1807,7 +1843,8 @@ if hist_close is not None and not hist_close.empty:
                             if date_obj and is_within_last_30_days(date_obj):
                                 found_news.append({
                                     "text": clean_formatted,
-                                    "is_today": (date_obj == today_date_obj)
+                                    "is_today": (date_obj == today_date_obj),
+                                    "date": date_obj
                                 })
                                 has_data = True
                                 
@@ -1978,7 +2015,9 @@ if hist_close is not None and not hist_close.empty:
                             expander_title = f"🔥 【{stock_name} ({stock})】 今日最新即時重大訊息！(共 {len(news_list)} 筆)"
                             
                         with st.expander(expander_title, expanded=True):
-                            for news_item in news_list:
+                            # 將重訊排序：以 date 欄位進行由新到舊排序 (新 -> 舊)
+                            sorted_news_list = sorted(news_list, key=lambda x: x.get("date") if x.get("date") is not None else date.min, reverse=True)
+                            for news_item in sorted_news_list:
                                 if news_item["is_today"]:
                                     st.markdown(f"<div style='color:#ef4444; font-weight:bold; padding: 4px 0;'>🔥 [今日即時] {news_item['text']}</div>", unsafe_allow_html=True)
                                 else:
