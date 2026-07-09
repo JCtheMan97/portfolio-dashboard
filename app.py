@@ -5,7 +5,7 @@ import numpy as np
 import plotly.graph_objects as go
 from datetime import datetime, timedelta, date
 import os
-import html
+import json
 import warnings
 import re
 import threading
@@ -74,139 +74,102 @@ if not check_password():
 ASSET_HISTORY_FILE_PATH = os.path.join(os.path.dirname(__file__), 'asset_history.csv')
 
 def track_weekly_assets(total_assets, total_liability, stock_value, net_equity):
-    """每週自動記錄一次資產狀況 (溫和 Backfill 數據最大保護版)"""
-    today_str = date.today().isoformat()
+    """每週自動記錄一次資產狀況 (對齊週日版，週六日不開盤，週日最準確)"""
+    today = date.today()
+    # 自動歸整為當週的週日
+    sunday_of_week = today + timedelta(days=(6 - today.weekday()))
+    target_date_str = sunday_of_week.isoformat()
+    
     new_row = {
-        "Date": today_str,
+        "Date": target_date_str,
         "Total_Assets": round(total_assets),
         "Total_Liability": round(total_liability),
         "Stock_Value": round(stock_value),
         "Net_Equity": round(net_equity)
     }
     
-    # 1. 讀取現有 CSV
-    df = pd.DataFrame()
-    if os.path.exists(ASSET_HISTORY_FILE_PATH):
+    trigger_rebuild = False
+    if not os.path.exists(ASSET_HISTORY_FILE_PATH):
+        trigger_rebuild = True
+    else:
         try:
             df = pd.read_csv(ASSET_HISTORY_FILE_PATH)
+            if df.empty or len(df) < 5 or df['Date'].nunique() < 5:
+                trigger_rebuild = True
         except Exception:
-            pass
-            
-    # 2. 如果 CSV 完全是空的或損壞，進行標準自癒初始化 (今日往回推 4 週預估 + 今日真實數據)
-    if df.empty:
-        d4 = (date.today() - timedelta(days=28)).isoformat()
-        d3 = (date.today() - timedelta(days=21)).isoformat()
-        d2 = (date.today() - timedelta(days=14)).isoformat()
-        d1 = (date.today() - timedelta(days=7)).isoformat()
-        
-        df = pd.DataFrame([
-            {"Date": d4, "Total_Assets": round(total_assets * 0.92), "Total_Liability": round(total_liability), "Stock_Value": round(stock_value * 0.90), "Net_Equity": round(net_equity * 0.93)},
-            {"Date": d3, "Total_Assets": round(total_assets * 0.94), "Total_Liability": round(total_liability), "Stock_Value": round(stock_value * 0.93), "Net_Equity": round(net_equity * 0.95)},
-            {"Date": d2, "Total_Assets": round(total_assets * 0.97), "Total_Liability": round(total_liability), "Stock_Value": round(stock_value * 0.96), "Net_Equity": round(net_equity * 0.97)},
-            {"Date": d1, "Total_Assets": round(total_assets * 0.99), "Total_Liability": round(total_liability), "Stock_Value": round(stock_value * 0.99), "Net_Equity": round(net_equity * 0.99)},
-            new_row
-        ])
-        df.to_csv(ASSET_HISTORY_FILE_PATH, index=False)
-        return df
+            trigger_rebuild = True
 
-    # 3. 🚀 溫和填補防護層：如果 CSV 已有部分珍貴歷史紀錄 (例如 7/5)，絕不能直接抹除覆蓋！
-    try:
-        # A. 自動修復與剔除污染的舊 CSV 日期標記 " (預估)"
-        for idx_row in range(len(df)):
-            curr_val = str(df.iloc[idx_row]['Date'])
-            df.iloc[idx_row, df.columns.get_loc('Date')] = curr_val.replace(" (預估)", "").strip()
+    if trigger_rebuild:
+        # A. 自癒重建邏輯 (保留已有日期，向最早日期往前補齊，對齊週日)
+        existing_rows = []
+        if os.path.exists(ASSET_HISTORY_FILE_PATH):
+            try:
+                raw_df = pd.read_csv(ASSET_HISTORY_FILE_PATH)
+                raw_df['Date'] = raw_df['Date'].astype(str).str.replace(" (預估)", "").str.strip()
+                existing_rows = raw_df.to_dict('records')
+            except:
+                pass
+        
+        base_date = sunday_of_week
+        if existing_rows:
+            try:
+                dates_parsed = [datetime.strptime(r['Date'], '%Y-%m-%d').date() for r in existing_rows if '-' in r['Date']]
+                if dates_parsed:
+                    base_date = min(dates_parsed)
+            except:
+                pass
+                
+        demo_rows = []
+        for i in range(4, 0, -1):
+            mock_date = (base_date - timedelta(days=7 * i)).isoformat()
+            demo_rows.append({
+                "Date": mock_date,
+                "Total_Assets": round(total_assets * (1.0 - 0.02 * i)),
+                "Total_Liability": round(total_liability),
+                "Stock_Value": round(stock_value * (1.0 - 0.02 * i)),
+                "Net_Equity": round(net_equity * (1.0 - 0.02 * i))
+            })
             
-        # B. 追加今日真實數據邏輯：僅在今日日期已存在於記錄 (覆蓋更新)，或距離最後一筆真實記錄已滿 7 天 (日常追加) 時才寫入今日數據。
-        # 絕不自動虛構漏登星期的數據！若有漏登，使用者可透過最下方的歷史資產編輯器手動如實補登。
-        if today_str in df['Date'].values:
-            df.loc[df['Date'] == today_str, ["Total_Assets", "Total_Liability", "Stock_Value", "Net_Equity"]] = [
+        df_rebuilt = pd.DataFrame(demo_rows)
+        if existing_rows:
+            df_rebuilt = pd.concat([df_rebuilt, pd.DataFrame(existing_rows)], ignore_index=True)
+            
+        df_rebuilt['Date'] = pd.to_datetime(df_rebuilt['Date'])
+        df_rebuilt = df_rebuilt.sort_values(by='Date').drop_duplicates(subset=['Date'], keep='last').reset_index(drop=True)
+        df_rebuilt['Date'] = df_rebuilt['Date'].dt.date.map(lambda x: x.isoformat())
+        df_rebuilt.to_csv(ASSET_HISTORY_FILE_PATH, index=False)
+        df = df_rebuilt
+    else:
+        df = pd.read_csv(ASSET_HISTORY_FILE_PATH)
+
+    try:
+        # B. 寫入或覆蓋本週日數據：若本週日已經存在，以最新數據覆蓋；否則追加一行
+        df['Date'] = df['Date'].astype(str).str.replace(" (預估)", "").str.strip()
+        if target_date_str in df['Date'].values:
+            df.loc[df['Date'] == target_date_str, ["Total_Assets", "Total_Liability", "Stock_Value", "Net_Equity"]] = [
                 new_row["Total_Assets"], new_row["Total_Liability"], new_row["Stock_Value"], new_row["Net_Equity"]
             ]
         else:
-            last_date_str = str(df.iloc[-1]['Date']).split()[0]
-            last_date = datetime.strptime(last_date_str, '%Y-%m-%d').date()
-            days_diff = (date.today() - last_date).days
-            if days_diff >= 7:
-                df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-
-        # C. 依 Date 欄位排序並去重，確保時間流暢度
-        df['Date'] = pd.to_datetime(df['Date'])
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+        
         df = df.sort_values(by='Date').drop_duplicates(subset=['Date'], keep='last').reset_index(drop=True)
-        df['Date'] = df['Date'].dt.date.map(lambda x: x.isoformat())
-
-        # D. 🚀 核心 Backfill 往前推補算法：若總筆數或不重複日期數小於 5，則以前面最早的那筆日期為基準，往回推算補齊
-        if len(df) < 5 or df['Date'].nunique() < 5:
-            df = df.drop_duplicates(subset=['Date'], keep='last').reset_index(drop=True)
-            needed = 5 - len(df)
-            first_date_str = df.iloc[0]['Date']
-            first_date = datetime.strptime(first_date_str, '%Y-%m-%d').date()
-            
-            backfill_rows = []
-            for k in range(needed, 0, -1):
-                back_date = (first_date - timedelta(days=7 * k)).isoformat()
-                # 數值以當時最早的那筆為基底進行微小折減，模擬歷史趨勢
-                backfill_rows.append({
-                    "Date": back_date,
-                    "Total_Assets": round(float(df.iloc[0]['Total_Assets']) * (1 - 0.02 * k)),
-                    "Total_Liability": round(float(df.iloc[0]['Total_Liability'])),
-                    "Stock_Value": round(float(df.iloc[0]['Stock_Value']) * (1 - 0.03 * k)),
-                    "Net_Equity": round(float(df.iloc[0]['Net_Equity']) * (1 - 0.02 * k))
-                })
-            # 將填補的預估行與真實歷史行合併，並將預估行排在最前面
-            df = pd.concat([pd.DataFrame(backfill_rows), df], ignore_index=True)
-
         df.to_csv(ASSET_HISTORY_FILE_PATH, index=False)
     except Exception:
         pass
-        
+    
     return pd.read_csv(ASSET_HISTORY_FILE_PATH)
 
-# Custom CSS disabled to let Streamlit style sidebar and layout automatically based on system theme.
 
 CSV_FILE_PATH = os.path.join(os.path.dirname(__file__), 'portfolio_data.csv')
-# CSV Paths & Refactored DB configs
+
 LOANS_FILE_PATH = os.path.join(os.path.dirname(__file__), 'loans_data.csv')
 
 # ============================================================
 # Dynamic Ticker name mapping from stocks_list.txt
 # ============================================================
 def load_stock_names():
-    names = {}
-    # Default fallback names mapping
-    fallback = {
-        "2330.TW": "台積電",
-        "2454.TW": "聯發科",
-        "2317.TW": "鴻海",
-        "2337.TW": "旺宏",
-        "3028.TW": "力致",
-        "6187.TWO": "萬潤",
-        "3037.TW": "欣興",
-        "3017.TW": "奇鋐",
-        "8086.TWO": "宏捷科",
-        "4749.TWO": "新應材",
-        "3680.TWO": "家登",
-        "8021.TW": "尖點",
-        "3481.TW": "群創",
-        "8438.TW": "昶昕",
-        "3691.TWO": "碩禾",
-        "2423.TW": "固緯",
-        "8147.TWO": "正淩",
-        "5284.TW": "JPP-KY",
-        "2493.TW": "揚博",
-        "3023.TW": "信邦",
-        "6672.TW": "騰輝電子-KY",
-        "3044.TW": "健鼎",
-        "6134.TWO": "萬旭",
-        "3305.TW": "昇貿",
-        "3550.TW": "聯穎",
-        "2413.TW": "環科",
-        "3577.TWO": "協易機",
-        "2428.TW": "興勤",
-        "6716.TWO": "應廣",
-        "8028.TW": "昇陽半導體",
-        "REALIZED_CASH": "已實現現金"
-    }
-    names.update(fallback)
+    # 僅保留內部虛擬代號的中文名，其餘股票中文名完全由外部 stocks_list.txt 動態加載，不佔用冗餘代碼篇幅
+    names = {"REALIZED_CASH": "已實現現金"}
     
     txt_path = os.path.join(os.path.dirname(__file__), 'stocks_list.txt')
     if os.path.exists(txt_path):
@@ -388,32 +351,6 @@ def get_margin_status(margin_ratio, call_threshold, recover_threshold,
                 "level": "danger",
             }
 
-def get_forward_looking_analysis(net_equity, total_stock_mv, cash, total_assets,
-                                  weighted_beta, leverage, hurdle, safe_w, danger_w, has_loan):
-    checks = []
-    cash_pct = (cash / total_assets * 100) if total_assets > 0 else 0
-    if cash_pct < 0:
-        checks.append({"title": "資金防護力",
-                        "desc": f"閒置現金僅 {cash_pct:.1f}%。子彈幾近滿載，處於全面曝險狀態。由於對回撤的容錯率降低，請嚴格執行個股的停損。"})
-    elif cash_pct < 5:
-        checks.append({"title": "資金防護力",
-                        "desc": f"閒置現金比例 {cash_pct:.1f}%，幾乎全倉。遇到突發修正時反應空間有限，建議保留適量子彈。"})
-    else:
-        checks.append({"title": "資金防護力",
-                        "desc": f"閒置現金 {cash_pct:.1f}%，具備基本的回撤緩衝空間。"})
-
-    checks.append({"title": "心理安全墊",
-                    "desc": f"目前 {safe_w:.1f}% 的資金已拉開 >10% 的利潤空間，利於放寬波動容忍度讓利潤奔跑。另有 {danger_w:.1f}% 的部位處於未實現虧損，屬於需嚴格防守的區域，觸及系統防線時請果斷汰弱留強。"})
-
-    if has_loan and hurdle > 0:
-        checks.append({"title": "債務生息門檻",
-                        "desc": f"當前負債結構下，組合每年需額外創造 {hurdle:.2f}% 的本金報酬，用以平滑利息支出成本。"})
-
-    expected_dd = 3 * weighted_beta * leverage
-    checks.append({"title": "槓桿波動提示",
-                    "desc": f"當前股票曝險槓桿達 {leverage:.2f}x。進攻極其銳利，但在高 Beta 環境下，若大盤出現波段修正，預估真實本金（ROE）將面臨約 {expected_dd:.1f}% 的同步縮水。"})
-    return checks
-
 # ============================================================
 # Title bar (Updated Title to JC, changed to 報告時間 with minute precision)
 # ============================================================
@@ -517,6 +454,21 @@ SCENARIO_OPTIONS = {
     0: "✏️ 自訂自創參數與借貸配置"
 }
 
+def _sync_loan_to_session(idx, row_data):
+    """將貸款資料列同步寫入 session_state widget keys (統一入口，避免重複程式碼)"""
+    st.session_state[f"l_label_{idx}"] = row_data.get('Label', '自訂貸款')
+    st.session_state[f"l_p_{idx}"] = float(row_data.get('Principal', 0.0))
+    st.session_state[f"l_r_{idx}"] = float(row_data.get('Annual_Rate', 0.0))
+    st.session_state[f"l_i_{idx}"] = float(row_data.get('Actual_Interest', 0.0))
+    st.session_state[f"l_margin_{idx}"] = bool(row_data.get('Is_Margin', False))
+    st.session_state[f"l_ratio_base_{idx}"] = float(row_data.get('Margin_Ratio_Baseline', 180.0))
+    st.session_state[f"l_avail_{idx}"] = float(row_data.get('Available_To_Borrow', 0.0))
+    st.session_state[f"l_call_{idx}"] = float(row_data.get('Call_Threshold', 130.0))
+    st.session_state[f"l_rec_{idx}"] = float(row_data.get('Recover_Threshold', 166.0))
+    st.session_state[f"l_liq_{idx}"] = float(row_data.get('Liquidation_Threshold', 110.0))
+    st.session_state[f"l_record_{idx}"] = bool(row_data.get('Has_Open_Record', False))
+    st.session_state[f"l_start_{idx}"] = str(row_data.get('Start_Date', ''))
+
 # Initialize scenario details state
 if 'prev_scenario_id' not in st.session_state:
     if os.path.exists(LOANS_FILE_PATH):
@@ -525,7 +477,6 @@ if 'prev_scenario_id' not in st.session_state:
         st.session_state.prev_scenario_id = 2 # Default to Scenario 3
 
 if 'current_cash' not in st.session_state:
-    import json
     _cfg_path = os.path.join(os.path.dirname(__file__), 'app_config.json')
     try:
         if os.path.exists(_cfg_path):
@@ -546,20 +497,8 @@ chosen_scenario_id = st.sidebar.selectbox(
 
 if 'loans_df' not in st.session_state:
     st.session_state.loans_df = get_default_loans_data()
-    # Initialize all widget keys from default CSV
     for idx, row in st.session_state.loans_df.iterrows():
-        st.session_state[f"l_label_{idx}"] = row['Label']
-        st.session_state[f"l_p_{idx}"] = float(row['Principal'])
-        st.session_state[f"l_r_{idx}"] = float(row['Annual_Rate'])
-        st.session_state[f"l_i_{idx}"] = float(row['Actual_Interest'])
-        st.session_state[f"l_margin_{idx}"] = bool(row['Is_Margin'])
-        st.session_state[f"l_ratio_base_{idx}"] = float(row.get('Margin_Ratio_Baseline', 180.0))
-        st.session_state[f"l_avail_{idx}"] = float(row.get('Available_To_Borrow', 0.0))
-        st.session_state[f"l_call_{idx}"] = float(row.get('Call_Threshold', 130.0))
-        st.session_state[f"l_rec_{idx}"] = float(row.get('Recover_Threshold', 166.0))
-        st.session_state[f"l_liq_{idx}"] = float(row.get('Liquidation_Threshold', 110.0))
-        st.session_state[f"l_record_{idx}"] = bool(row.get('Has_Open_Record', False))
-        st.session_state[f"l_start_{idx}"] = str(row.get('Start_Date', ''))
+        _sync_loan_to_session(idx, row)
 
 if chosen_scenario_id != st.session_state.prev_scenario_id:
     st.session_state.prev_scenario_id = chosen_scenario_id
@@ -583,19 +522,7 @@ if chosen_scenario_id != st.session_state.prev_scenario_id:
                 'Liquidation_Threshold': float(l.get('liquidation_threshold', 110.0)),
                 'Has_Open_Record': bool(l.get('has_open_margin_call_record', False))
             })
-            # Sync keys
-            st.session_state[f"l_label_{idx}"] = l.get('label', '自訂貸款')
-            st.session_state[f"l_p_{idx}"] = float(l.get('principal', l.get('balance', 0.0)))
-            st.session_state[f"l_r_{idx}"] = float(l.get('annual_rate', 0.0) * 100)
-            st.session_state[f"l_i_{idx}"] = float(l.get('actual_interest', 0.0))
-            st.session_state[f"l_margin_{idx}"] = bool(l.get('margin_loan', False))
-            st.session_state[f"l_ratio_base_{idx}"] = float(l.get('margin_ratio', 180.0))
-            st.session_state[f"l_avail_{idx}"] = float(l.get('available_to_borrow', 0.0))
-            st.session_state[f"l_call_{idx}"] = float(l.get('call_threshold', 130.0))
-            st.session_state[f"l_rec_{idx}"] = float(l.get('recover_threshold', 166.0))
-            st.session_state[f"l_liq_{idx}"] = float(l.get('liquidation_threshold', 110.0))
-            st.session_state[f"l_record_{idx}"] = bool(l.get('has_open_margin_call_record', False))
-            st.session_state[f"l_start_{idx}"] = l.get('start_date', datetime.now().strftime('%Y-%m-%d'))
+            _sync_loan_to_session(idx, preset_loans[-1])
             
         loans_df = pd.DataFrame(preset_loans)
         loans_df.to_csv(LOANS_FILE_PATH, index=False)
@@ -614,8 +541,6 @@ _cash_input = st.sidebar.number_input(
 if _cash_input != st.session_state.current_cash:
     st.session_state.current_cash = _cash_input
 if st.sidebar.button("💾 保存現金設定", key="save_cash_btn"):
-    # Persist to a small config JSON next to the CSV files
-    import json
     _cfg_path = os.path.join(os.path.dirname(__file__), 'app_config.json')
     try:
         cfg = {}
@@ -1688,10 +1613,7 @@ if hist_close is not None and not hist_close.empty:
         my_stocks_dynamic = [t.split('.')[0] for t in active_tickers if t != 'REALIZED_CASH']
         
         def get_stock_name_by_code(code):
-            for k, v in STOCK_NAMES.items():
-                if k.split('.')[0] == code:
-                    return v
-            return "未知個股"
+            return STOCK_NAMES.get(code + ".TW", STOCK_NAMES.get(code + ".TWO", STOCK_NAMES.get(code, "未知個股")))
 
         monitor_list_display = [f"{get_stock_name_by_code(s)} ({s})" for s in my_stocks_dynamic]
         
