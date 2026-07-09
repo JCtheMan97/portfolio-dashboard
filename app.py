@@ -803,7 +803,7 @@ current_cash = st.session_state.current_cash
 
 # Advanced config expander (Updated Risk Free label to Taiwan specific)
 with st.sidebar.expander("🛠️ 進階模型設定"):
-    min_lookback_days = st.number_input("Beta/Alpha 歷史追溯天數 (需 >=253 天方能精準計算 RS 四大象限)", value=90, min_value=20, max_value=365)
+    min_lookback_days = st.number_input("Beta/Alpha 歷史追溯天數 (用於計算歷史與危機模式 Beta 以及 Jensen's Alpha)", value=90, min_value=20, max_value=365)
     
     # Updated default to 1.725% reflecting Taiwan Bank 1-Year Time Deposit Rate
     annual_rf = st.number_input(
