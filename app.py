@@ -636,7 +636,10 @@ if st.sidebar.button("💾 保存現金設定", key="save_cash_btn"):
         st.sidebar.error(f"保存失敗: {e}")
 
 # We load active_stock_df here briefly to calculate price ratios for auto-margin updates
-default_csv = pd.read_csv(CSV_FILE_PATH) if os.path.exists(CSV_FILE_PATH) else pd.DataFrame()
+try:
+    default_csv = pd.read_csv(CSV_FILE_PATH) if os.path.exists(CSV_FILE_PATH) else pd.DataFrame()
+except Exception:
+    default_csv = pd.DataFrame()
 active_tickers_list = []
 if not default_csv.empty and 'Ticker' in default_csv.columns:
     active_tickers_list = [t.strip().upper() for t in default_csv['Ticker'].tolist() if t.strip().upper() != 'REALIZED_CASH']
@@ -661,7 +664,9 @@ sc_prices = {}
 sc_hist = pd.DataFrame()
 if active_tickers_list:
     try:
-        sc_prices, sc_hist = load_market_data(active_tickers_list, min_lookback_days=lookback_days)
+        _sc_result = load_market_data(active_tickers_list, min_lookback_days=lookback_days)
+        if _sc_result is not None and _sc_result[0] is not None:
+            sc_prices, sc_hist = _sc_result
     except Exception:
         pass
 
@@ -971,7 +976,11 @@ if hist_close is not None and not hist_close.empty:
     prev_closes = {}
     for t in hist_close.columns:
         if len(hist_close) > 1:
-            if hist_close.index[-1].date() == datetime.now().date():
+            try:
+                last_idx_date = hist_close.index[-1].date() if hasattr(hist_close.index[-1], 'date') else hist_close.index[-1]
+            except Exception:
+                last_idx_date = None
+            if last_idx_date == datetime.now().date():
                 prev_closes[t] = float(hist_close[t].iloc[-2])
             else:
                 prev_closes[t] = float(hist_close[t].iloc[-1])
