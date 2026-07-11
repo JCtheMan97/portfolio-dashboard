@@ -8,8 +8,7 @@ import os
 import json
 import warnings
 import re
-import threading
-import asyncio
+import time
 try:
     import zoneinfo
     TW_TZ = zoneinfo.ZoneInfo("Asia/Taipei")
@@ -18,7 +17,6 @@ except Exception:
     TW_TZ = timezone(timedelta(hours=8))
 import requests
 from bs4 import BeautifulSoup
-from playwright.async_api import async_playwright
 
 warnings.filterwarnings('ignore')
 
@@ -1718,76 +1716,7 @@ if hist_close is not None and not hist_close.empty:
             delta_days = (today - target_date).days
             return 0 <= delta_days <= 30
 
-        async def fetch_stock_news_worker(context, stock_code, semaphore, today_date_obj, current_tw_year_str):
-            async with semaphore:
-                urls = [
-                    f"https://mops.twse.com.tw/mops/#/web/t146sb05?companyId={stock_code}",
-                    f"https://mops.twse.com.tw/mops/#/web/t146sb05?companyId={stock_code}",
-                    f"https://mopsov.twse.com.tw/mops/web/t146sb05?companyId={stock_code}"
-                ]
-                
-                max_retries = len(urls)
-                
-                for attempt in range(1, max_retries + 1):
-                    target_url = urls[attempt - 1]
-                    found_news = []
-                    page = await context.new_page()
-                    try:
-                        await page.goto(target_url, wait_until="domcontentloaded", timeout=25000)
-                        
-                        try:
-                            await page.wait_for_function(f"""
-                                () => {{
-                                    const tableText = document.querySelector('.el-table, table')?.innerText || '';
-                                    return tableText.includes('{current_tw_year_str}/') || tableText.includes('暫無數據') || tableText.includes('無資料');
-                                }}
-                            """, timeout=6000)
-                        except:
-                            pass
-                            
-                        await page.wait_for_timeout(450)
-                        
-                        page_text = await page.evaluate("() => document.body.innerText")
-                        lines = page_text.split('\n')
-                        
-                        has_valid_table_data = any(f"{current_tw_year_str}/" in line or "暫無數據" in line or "無資料" in line for line in lines)
-                        
-                        if not has_valid_table_data and attempt < max_retries:
-                            await page.close()
-                            await asyncio.sleep(0.8 * attempt)
-                            continue
-                        
-                        for line in lines:
-                            clean_line = line.strip()
-                            if not clean_line or "詳細資料" in clean_line or "主旨" in clean_line:
-                                continue
-                            if f"{current_tw_year_str}/" in clean_line and len(clean_line) > 10:
-                                if "請輸入" in clean_line or "公司代碼" in clean_line or "歷史查詢" in clean_line:
-                                    continue
-                                
-                                date_obj = parse_to_date_object(clean_line)
-                                if date_obj and is_within_last_30_days(date_obj):
-                                    found_news.append({
-                                        "text": clean_line,
-                                        "is_today": (date_obj == today_date_obj),
-                                        "date": date_obj
-                                    })
-                                    
-                        await page.close()
-                        
-                        seen = set()
-                        unique_news = []
-                        for item in found_news:
-                            if item["text"] not in seen:
-                                seen.add(item["text"])
-                                unique_news.append(item)
-                        return stock_code, unique_news
-                    except Exception:
-                        await page.close()
-                        if attempt == max_retries:
-                            return stock_code, []
-                        await asyncio.sleep(1.5)
-                return stock_code, []
+
 
         def fetch_stock_news_requests_fallback(stock_code):
             """免瀏覽器核心的 HTTP 輕量級綜合重訊與除權息爬蟲 (當 Playwright 崩潰時自動降級備援使用)"""
@@ -1901,93 +1830,17 @@ if hist_close is not None and not hist_close.empty:
                     unique_news.append(item)
             return unique_news
 
-        async def run_scraper(stocks_list, status_placeholder, progress_bar):
-            use_playwright = True
-            browser = None
-            p = None
-            try:
-                p = await async_playwright().start()
-                browser = await p.chromium.launch(headless=True)
-            except Exception as e:
-                use_playwright = False
-                status_placeholder.info("⚡ 偵測到雲端無頭環境，已自動啟用【備援 HTTP 輕量級重訊極速引擎】安全掃描中...")
-                if p:
-                    try:
-                        await p.stop()
-                    except:
-                        pass
-            
+        def run_scraper(stocks_list, status_placeholder, progress_bar):
             results = []
             total = len(stocks_list)
-            
-            if use_playwright and browser:
-                try:
-                    context = await browser.new_context(
-                        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                        viewport={"width": 1400, "height": 900}
-                    )
-                    
-                    semaphore = asyncio.Semaphore(3)
-                    today_date_obj = date.today()
-                    current_tw_year_str = str(today_date_obj.year - 1911)
-                    
-                    tasks = [fetch_stock_news_worker(context, stock, semaphore, today_date_obj, current_tw_year_str) for stock in stocks_list]
-                    
-                    for i, coro in enumerate(asyncio.as_completed(tasks)):
-                        stock, news = await coro
-                        results.append((stock, news))
-                        percent = (i + 1) / total
-                        status_placeholder.write(f"⏳ **[Playwright 引擎]** 已完成掃描個股：{get_stock_name_by_code(stock)} ({stock}) (進度: {i+1}/{total})")
-                        progress_bar.progress(percent)
-                except Exception as run_err:
-                    use_playwright = False
-                finally:
-                    try:
-                        await browser.close()
-                    except:
-                        pass
-                    try:
-                        await p.stop()
-                    except:
-                        pass
-            
-            if not use_playwright:
-                for i, stock in enumerate(stocks_list):
-                    news = fetch_stock_news_requests_fallback(stock)
-                    results.append((stock, news))
-                    percent = (i + 1) / total
-                    status_placeholder.write(f"⏳ **[HTTP 備援引擎]** 已完成掃描個股：{get_stock_name_by_code(stock)} ({stock}) (進度: {i+1}/{total})")
-                    progress_bar.progress(percent)
-                    await asyncio.sleep(0.3)
-                    
+            for i, stock in enumerate(stocks_list):
+                news = fetch_stock_news_requests_fallback(stock)
+                results.append((stock, news))
+                percent = (i + 1) / total
+                status_placeholder.write(f"⏳ **[HTTP 備援引擎]** 已完成掃描個股：{get_stock_name_by_code(stock)} ({stock}) (進度: {i+1}/{total})")
+                progress_bar.progress(percent)
+                time.sleep(0.3)
             return results
-
-        def run_async(coro):
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            if loop.is_running():
-                result = [None]
-                exception = [None]
-                def worker():
-                    try:
-                        new_loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(new_loop)
-                        result[0] = new_loop.run_until_complete(coro)
-                    except Exception as e:
-                        exception[0] = e
-                    finally:
-                        new_loop.close()
-                t = threading.Thread(target=worker)
-                t.start()
-                t.join()
-                if exception[0]:
-                    raise exception[0]
-                return result[0]
-            else:
-                return loop.run_until_complete(coro)
 
         if st.button("📡 啟動即時公開資訊觀測站重訊掃描"):
             if not my_stocks_dynamic:
@@ -1995,8 +1848,8 @@ if hist_close is not None and not hist_close.empty:
             else:
                 status_placeholder = st.empty()
                 progress_bar = st.progress(0.0)
-                with st.spinner("⚡ 正在並行發動非同步陣列爬蟲，全速觀測中..."):
-                    results = run_async(run_scraper(my_stocks_dynamic, status_placeholder, progress_bar))
+                with st.spinner("⚡ 正在發動輕量級重訊極速引擎，全速觀測中..."):
+                    results = run_scraper(my_stocks_dynamic, status_placeholder, progress_bar)
                 
                 progress_bar.empty()
                 status_placeholder.empty()
