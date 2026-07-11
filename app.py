@@ -168,8 +168,40 @@ LOANS_FILE_PATH = os.path.join(os.path.dirname(__file__), 'loans_data.csv')
 # Dynamic Ticker name mapping from stocks_list.txt
 # ============================================================
 def load_stock_names():
-    # 僅保留內部虛擬代號的中文名，其餘股票中文名完全由外部 stocks_list.txt 動態加載，不佔用冗餘代碼篇幅
-    names = {"REALIZED_CASH": "已實現現金"}
+    # 內建常規持有個股的中文名稱備援，確保 API 離線/鎖 IP 或缺乏 stocks_list.txt 時仍能秒速加載最重要個股，避免讀取超時
+    names = {
+        "REALIZED_CASH": "已實現現金",
+        "2330": "台積電", "2330.TW": "台積電",
+        "2454": "聯發科", "2454.TW": "聯發科",
+        "2317": "鴻海", "2317.TW": "鴻海",
+        "2337": "旺宏", "2337.TW": "旺宏",
+        "3028": "力致", "3028.TW": "力致",
+        "6187": "萬潤", "6187.TWO": "萬潤",
+        "3037": "欣興", "3037.TW": "欣興",
+        "3017": "奇鋐", "3017.TW": "奇鋐",
+        "8086": "宏捷科", "8086.TWO": "宏捷科",
+        "4749": "新應材", "4749.TWO": "新應材",
+        "3680": "家登", "3680.TWO": "家登",
+        "8021": "尖點", "8021.TW": "尖點",
+        "3481": "群創", "3481.TW": "群創",
+        "8438": "昶昕", "8438.TW": "昶昕",
+        "3691": "碩禾", "3691.TWO": "碩禾",
+        "2423": "固緯", "2423.TW": "固緯",
+        "8147": "正淩", "8147.TWO": "正淩",
+        "5284": "JPP-KY", "5284.TW": "JPP-KY",
+        "2493": "揚博", "2493.TW": "揚博",
+        "3023": "信邦", "3023.TW": "信邦",
+        "6672": "騰輝電子-KY", "6672.TW": "騰輝電子-KY",
+        "3044": "健鼎", "3044.TW": "健鼎",
+        "6134": "萬旭", "6134.TWO": "萬旭",
+        "3305": "昇貿", "3305.TW": "昇貿",
+        "3550": "聯穎", "3550.TW": "聯穎",
+        "2413": "環科", "2413.TW": "環科",
+        "3577": "協易機", "3577.TWO": "協易機",
+        "2428": "興勤", "2428.TW": "興勤",
+        "6716": "應廣", "6716.TWO": "應廣",
+        "8028": "昇陽半導體", "8028.TW": "昇陽半導體"
+    }
     
     txt_path = os.path.join(os.path.dirname(__file__), 'stocks_list.txt')
     
@@ -177,9 +209,9 @@ def load_stock_names():
     if not os.path.exists(txt_path) or os.path.getsize(txt_path) == 0:
         try:
             fetched_dict = {}
-            # 1. 獲取上市公司 (TWSE)
+            # 1. 獲取上市公司 (TWSE) - 極短 1.5 秒 timeout 避免 Streamlit Cloud 初始化阻塞
             url_twse = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
-            r_twse = requests.get(url_twse, timeout=10)
+            r_twse = requests.get(url_twse, timeout=1.5)
             if r_twse.status_code == 200:
                 for item in r_twse.json():
                     code = item.get("Code", "").strip()
@@ -187,9 +219,9 @@ def load_stock_names():
                     if code and name and code.isdigit() and len(code) == 4:
                         fetched_dict[f"{code}.TW"] = name
             
-            # 2. 獲取上櫃公司 (TPEx)
+            # 2. 獲取上櫃公司 (TPEx) - 極短 1.5 秒 timeout
             url_tpex = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes"
-            r_tpex = requests.get(url_tpex, timeout=10)
+            r_tpex = requests.get(url_tpex, timeout=1.5)
             if r_tpex.status_code == 200:
                 for item in r_tpex.json():
                     code = item.get("SecuritiesCompanyCode", "").strip()
@@ -206,7 +238,7 @@ def load_stock_names():
                 except Exception:
                     pass
                 
-                # 同時將記憶體中剛抓下來的名稱加載進 names，以防寫檔失敗時畫面全部變「未知個股」！
+                # 同時將記憶體中剛抓下來的名稱加載進 names
                 for code, name in fetched_dict.items():
                     names[code] = name
                     names[code.split('.')[0]] = name
