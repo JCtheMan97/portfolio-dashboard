@@ -296,11 +296,20 @@ def load_market_data(tickers, min_lookback_days):
         st.error(f"❌ 無法獲取歷史數據: {e}")
         return None, None
 
+    if raw_download is None or raw_download.empty:
+        return None, None
+
     hist_close = pd.DataFrame(index=raw_download.index)
+    is_multi = isinstance(raw_download.columns, pd.MultiIndex)
+    
     for t in all_tickers:
-        if t in raw_download.columns.levels[0]:
-            df_ticker = raw_download[t]
-            hist_close[t] = df_ticker['Adj Close'] if 'Adj Close' in df_ticker.columns else df_ticker['Close']
+        if is_multi:
+            if t in raw_download.columns.levels[0]:
+                df_ticker = raw_download[t]
+                hist_close[t] = df_ticker['Adj Close'] if 'Adj Close' in df_ticker.columns else df_ticker['Close']
+        else:
+            if t in raw_download.columns:
+                hist_close[t] = raw_download[t]
 
     hist_close = hist_close.ffill().bfill()
     if hist_close.index.tz is not None:
@@ -930,6 +939,27 @@ if not tickers:
 else:
     with st.spinner("⏳ 正在同步最新報價與計算歷史 Beta..."):
         latest_prices, hist_close = load_market_data(tickers, min_lookback_days)
+
+# ── 安全備用機制：若報價同步失敗（如離線、防禦封鎖），建置 Mock 資料防止 UI 崩潰 ──
+if (hist_close is None or hist_close.empty) and tickers:
+    st.warning("⚠️ Yahoo Finance 報價同步失敗（可能因網路連線或 API 限制）。系統已自動進入「離線估算模式」，部分歷史風險指標可能暫時無法更新。")
+    mock_dates = [datetime.now() - timedelta(days=i) for i in range(10, -1, -1)]
+    hist_close = pd.DataFrame(index=mock_dates)
+    
+    # 初始化為字典，避免 NoneType 賦值錯誤
+    latest_prices = {}
+    
+    # 填入基準大盤數據
+    hist_close["^TWII"] = 20000.0
+    latest_prices["^TWII"] = 20000.0
+    
+    for t in tickers:
+        # 尋找 Avg_Cost 做為估計價格
+        cost_series = active_stock_df[active_stock_df['Ticker'] == t]['Avg_Cost']
+        fallback_p = float(cost_series.iloc[0]) if (not cost_series.empty and float(cost_series.iloc[0]) > 0) else 100.0
+        
+        hist_close[t] = fallback_p
+        latest_prices[t] = fallback_p
 
 if hist_close is not None and not hist_close.empty:
     # Calculations
