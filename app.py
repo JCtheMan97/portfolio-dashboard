@@ -13,7 +13,7 @@ import asyncio
 try:
     import zoneinfo
     TW_TZ = zoneinfo.ZoneInfo("Asia/Taipei")
-except ImportError:
+except Exception:
     from datetime import timezone
     TW_TZ = timezone(timedelta(hours=8))
 import requests
@@ -157,7 +157,7 @@ def track_weekly_assets(total_assets, total_liability, stock_value, net_equity):
     except Exception:
         pass
     
-    return pd.read_csv(ASSET_HISTORY_FILE_PATH)
+    return df
 
 
 CSV_FILE_PATH = os.path.join(os.path.dirname(__file__), 'portfolio_data.csv')
@@ -199,9 +199,17 @@ def load_stock_names():
             
             if fetched_dict:
                 # 寫入 stocks_list.txt (使用帶有 BOM 的 UTF-8-sig)
-                with open(txt_path, "w", encoding="utf-8-sig") as f:
-                    for code, name in sorted(fetched_dict.items()):
-                        f.write(f"{code},{name}\n")
+                try:
+                    with open(txt_path, "w", encoding="utf-8-sig") as f:
+                        for code, name in sorted(fetched_dict.items()):
+                            f.write(f"{code},{name}\n")
+                except Exception:
+                    pass
+                
+                # 同時將記憶體中剛抓下來的名稱加載進 names，以防寫檔失敗時畫面全部變「未知個股」！
+                for code, name in fetched_dict.items():
+                    names[code] = name
+                    names[code.split('.')[0]] = name
         except Exception:
             pass
 
@@ -235,7 +243,7 @@ STOCK_NAMES = load_stock_names()
 def load_market_data(tickers, min_lookback_days):
     today = datetime.now()
     end_date_str = today.strftime('%Y-%m-%d')
-    start_date = today - timedelta(days=min_lookback_days)
+    start_date = today - timedelta(days=int(min_lookback_days))
     start_date_str = start_date.strftime('%Y-%m-%d')
 
     benchmark_tickers = ["^TWII"]
