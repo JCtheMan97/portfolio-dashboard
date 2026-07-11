@@ -209,9 +209,9 @@ def load_stock_names():
     if not os.path.exists(txt_path) or os.path.getsize(txt_path) == 0:
         try:
             fetched_dict = {}
-            # 1. 獲取上市公司 (TWSE) - 極短 1.5 秒 timeout 避免 Streamlit Cloud 初始化阻塞
+            # 1. 獲取上市公司 (TWSE) - 使用合理 5.0 秒 timeout 兼顧成功率與啟動速度
             url_twse = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
-            r_twse = requests.get(url_twse, timeout=1.5)
+            r_twse = requests.get(url_twse, timeout=5.0)
             if r_twse.status_code == 200:
                 for item in r_twse.json():
                     code = item.get("Code", "").strip()
@@ -219,9 +219,9 @@ def load_stock_names():
                     if code and name and code.isdigit() and len(code) == 4:
                         fetched_dict[f"{code}.TW"] = name
             
-            # 2. 獲取上櫃公司 (TPEx) - 極短 1.5 秒 timeout
+            # 2. 獲取上櫃公司 (TPEx) - 使用 5.0 秒 timeout
             url_tpex = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes"
-            r_tpex = requests.get(url_tpex, timeout=1.5)
+            r_tpex = requests.get(url_tpex, timeout=5.0)
             if r_tpex.status_code == 200:
                 for item in r_tpex.json():
                     code = item.get("SecuritiesCompanyCode", "").strip()
