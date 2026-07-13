@@ -83,7 +83,8 @@ def track_weekly_assets(total_assets, total_liability, stock_value, net_equity):
         "Total_Assets": round(total_assets),
         "Total_Liability": round(total_liability),
         "Stock_Value": round(stock_value),
-        "Net_Equity": round(net_equity)
+        "Net_Equity": round(net_equity),
+        "Is_Estimated": False
     }
     
     trigger_rebuild = False
@@ -125,12 +126,16 @@ def track_weekly_assets(total_assets, total_liability, stock_value, net_equity):
                 "Total_Assets": round(total_assets * (1.0 - 0.02 * i)),
                 "Total_Liability": round(total_liability),
                 "Stock_Value": round(stock_value * (1.0 - 0.02 * i)),
-                "Net_Equity": round(net_equity * (1.0 - 0.02 * i))
+                "Net_Equity": round(net_equity * (1.0 - 0.02 * i)),
+                "Is_Estimated": True
             })
             
         df_rebuilt = pd.DataFrame(demo_rows)
         if existing_rows:
-            df_rebuilt = pd.concat([df_rebuilt, pd.DataFrame(existing_rows)], ignore_index=True)
+            existing_df = pd.DataFrame(existing_rows)
+            if "Is_Estimated" not in existing_df.columns:
+                existing_df["Is_Estimated"] = False
+            df_rebuilt = pd.concat([df_rebuilt, existing_df], ignore_index=True)
             
         df_rebuilt['Date'] = pd.to_datetime(df_rebuilt['Date'])
         df_rebuilt = df_rebuilt.sort_values(by='Date').drop_duplicates(subset=['Date'], keep='last').reset_index(drop=True)
@@ -139,13 +144,22 @@ def track_weekly_assets(total_assets, total_liability, stock_value, net_equity):
         df = df_rebuilt
     else:
         df = pd.read_csv(ASSET_HISTORY_FILE_PATH)
+        if "Is_Estimated" not in df.columns:
+            df["Is_Estimated"] = False
+            if len(df) >= 4:
+                df.iloc[:4, df.columns.get_loc("Is_Estimated")] = True
+            else:
+                df["Is_Estimated"] = True
 
     try:
         # B. 寫入或覆蓋本週日數據：若本週日已經存在，以最新數據覆蓋；否則追加一行
         df['Date'] = df['Date'].astype(str).str.replace(" (預估)", "").str.strip()
+        if "Is_Estimated" not in df.columns:
+            df["Is_Estimated"] = False
+            
         if target_date_str in df['Date'].values:
-            df.loc[df['Date'] == target_date_str, ["Total_Assets", "Total_Liability", "Stock_Value", "Net_Equity"]] = [
-                new_row["Total_Assets"], new_row["Total_Liability"], new_row["Stock_Value"], new_row["Net_Equity"]
+            df.loc[df['Date'] == target_date_str, ["Total_Assets", "Total_Liability", "Stock_Value", "Net_Equity", "Is_Estimated"]] = [
+                new_row["Total_Assets"], new_row["Total_Liability"], new_row["Stock_Value"], new_row["Net_Equity"], False
             ]
         else:
             df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
@@ -1570,11 +1584,16 @@ if hist_close is not None and not hist_close.empty:
             stock_w = hist_df['Stock_Value'] / 10000
             liability_w = hist_df['Total_Liability'] / 10000
             
-            # 建立用於 X 軸顯示的標籤 (CSV 保持純日期，圖表上動態將前 4 筆歷史預估資料標記 " (預估)")
+            # 建立用於 X 軸顯示的標籤 (讀取 Is_Estimated 欄位判定預估)
             x_labels = []
-            for idx_row, row_val in enumerate(hist_df['Date']):
-                date_str = str(row_val).replace(" (預估)", "").strip()
-                if idx_row < 4 and date_str != today_str:
+            for idx_row, row in hist_df.iterrows():
+                date_str = str(row['Date']).replace(" (預估)", "").strip()
+                is_est = row.get('Is_Estimated', False)
+                # 向下相容：若舊資料無此欄位，仍以前 4 筆判定
+                if 'Is_Estimated' not in hist_df.columns:
+                    is_est = (idx_row < 4 and date_str != today_str)
+                
+                if is_est:
                     x_labels.append(f"{date_str} (預估)")
                 else:
                     x_labels.append(date_str)
@@ -1677,10 +1696,21 @@ if hist_close is not None and not hist_close.empty:
             if os.path.exists(ASSET_HISTORY_FILE_PATH):
                 try:
                     raw_hist_df = pd.read_csv(ASSET_HISTORY_FILE_PATH)
-                    hist_cols_needed = ['Date', 'Total_Assets', 'Total_Liability', 'Stock_Value', 'Net_Equity']
+                    # 補足缺失的 Is_Estimated 欄位以向下相容
+                    if 'Is_Estimated' not in raw_hist_df.columns:
+                        raw_hist_df['Is_Estimated'] = False
+                        if len(raw_hist_df) >= 4:
+                            raw_hist_df.iloc[:4, raw_hist_df.columns.get_loc('Is_Estimated')] = True
+                        else:
+                            raw_hist_df['Is_Estimated'] = True
+                            
+                    hist_cols_needed = ['Date', 'Total_Assets', 'Total_Liability', 'Stock_Value', 'Net_Equity', 'Is_Estimated']
                     for col in hist_cols_needed:
                         if col not in raw_hist_df.columns:
-                            raw_hist_df[col] = 0
+                            if col == 'Is_Estimated':
+                                raw_hist_df[col] = False
+                            else:
+                                raw_hist_df[col] = 0
                     raw_hist_df = raw_hist_df[hist_cols_needed]
                     
                     edited_hist = st.data_editor(
@@ -1693,7 +1723,8 @@ if hist_close is not None and not hist_close.empty:
                             "Total_Assets": st.column_config.NumberColumn("總資產 (NT$)", min_value=0.0, format="%.0f"),
                             "Total_Liability": st.column_config.NumberColumn("總負債 (NT$)", min_value=0.0, format="%.0f"),
                             "Stock_Value": st.column_config.NumberColumn("股票庫存 (NT$)", min_value=0.0, format="%.0f"),
-                            "Net_Equity": st.column_config.NumberColumn("淨資產 (NT$)", min_value=0.0, format="%.0f")
+                            "Net_Equity": st.column_config.NumberColumn("淨資產 (NT$)", min_value=0.0, format="%.0f"),
+                            "Is_Estimated": st.column_config.CheckboxColumn("是否為預估數據")
                         }
                     )
                     
