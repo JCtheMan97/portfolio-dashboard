@@ -1564,7 +1564,20 @@ if hist_close is not None and not hist_close.empty:
         # 【每週資產歷史趨勢折線圖】
         # ------------------------------------------------------------
         st.markdown("---")
-        st.markdown("### 📈 【每週資產歷史趨勢折線圖】")
+        
+        # 建立標題與範圍切換選單
+        col_title, col_range = st.columns([3, 1])
+        with col_title:
+            st.markdown("### 📈 【每週資產歷史趨勢折線圖】")
+        with col_range:
+            range_opt = st.selectbox(
+                "顯示範圍",
+                ["最近 12 週", "最近 26 週 (半年)", "最近 52 週 (一年)", "全部歷史"],
+                index=0,
+                key="chart_range_selector",
+                label_visibility="collapsed"
+            )
+            
         try:
             today_str = date.today().isoformat()
             total_assets_calc = total_stock_market_value + current_cash
@@ -1579,19 +1592,30 @@ if hist_close is not None and not hist_close.empty:
                 net_equity=net_equity_calc
             )
             
-            assets_w = hist_df['Total_Assets'] / 10000
-            equity_w = hist_df['Net_Equity'] / 10000
-            stock_w = hist_df['Stock_Value'] / 10000
-            liability_w = hist_df['Total_Liability'] / 10000
+            # 根據下拉選單過濾顯示的數據量
+            if range_opt == "最近 12 週":
+                display_df = hist_df.tail(12).copy()
+            elif range_opt == "最近 26 週 (半年)":
+                display_df = hist_df.tail(26).copy()
+            elif range_opt == "最近 52 週 (一年)":
+                display_df = hist_df.tail(52).copy()
+            else:
+                display_df = hist_df.copy()
+                
+            assets_w = display_df['Total_Assets'] / 10000
+            equity_w = display_df['Net_Equity'] / 10000
+            stock_w = display_df['Stock_Value'] / 10000
+            liability_w = display_df['Total_Liability'] / 10000
             
             # 建立用於 X 軸顯示的標籤 (讀取 Is_Estimated 欄位判定預估)
             x_labels = []
-            for idx_row, row in hist_df.iterrows():
+            for idx_row, row in display_df.iterrows():
                 date_str = str(row['Date']).replace(" (預估)", "").strip()
                 is_est = row.get('Is_Estimated', False)
                 # 向下相容：若舊資料無此欄位，仍以前 4 筆判定
-                if 'Is_Estimated' not in hist_df.columns:
-                    is_est = (idx_row < 4 and date_str != today_str)
+                if 'Is_Estimated' not in display_df.columns:
+                    orig_idx = hist_df[hist_df['Date'] == row['Date']].index[0]
+                    is_est = (orig_idx < 4 and date_str != today_str)
                 
                 if is_est:
                     x_labels.append(f"{date_str} (預估)")
