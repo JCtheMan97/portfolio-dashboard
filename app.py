@@ -280,6 +280,28 @@ def load_stock_names():
 
 STOCK_NAMES = load_stock_names()
 
+def get_official_taiex_data():
+    """從台灣證券交易所獲取本月份的官方大盤加權指數收盤數據"""
+    taiex_dict = {}
+    try:
+        today_str = datetime.now().strftime('%Y%m%d')
+        url = f"https://www.twse.com.tw/exchangeReport/FMTQIK?response=json&date={today_str}"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        r = requests.get(url, headers=headers, timeout=5).json()
+        if r.get('status') == 'OK' and r.get('data'):
+            for row in r['data']:
+                date_parts = row[0].split('/')
+                if len(date_parts) == 3:
+                    year = int(date_parts[0]) + 1911
+                    month = int(date_parts[1])
+                    day = int(date_parts[2])
+                    date_str = f"{year:04d}-{month:02d}-{day:02d}"
+                    price = float(row[4].replace(',', ''))
+                    taiex_dict[date_str] = price
+    except Exception:
+        pass
+    return taiex_dict
+
 # ============================================================
 # Caching Data Loading
 # ============================================================
@@ -337,6 +359,28 @@ def load_market_data(tickers, min_lookback_days):
             latest_prices[t] = float(hist_close[t].iloc[-1])
         else:
             latest_prices[t] = 0.0
+
+    # ── 證交所官方大盤數據校正 ──
+    try:
+        official_taiex = get_official_taiex_data()
+        if official_taiex and "^TWII" in hist_close.columns:
+            for date_str, price in official_taiex.items():
+                dt = pd.to_datetime(date_str)
+                hist_close.loc[dt, "^TWII"] = price
+            
+            hist_close = hist_close.sort_index()
+            hist_close = hist_close.ffill().bfill()
+            
+            # 校正 latest_prices 中的加權指數
+            today_date_str = today.strftime('%Y-%m-%d')
+            if today_date_str in official_taiex:
+                latest_prices["^TWII"] = official_taiex[today_date_str]
+            else:
+                sorted_dates = sorted(official_taiex.keys())
+                if sorted_dates:
+                    latest_prices["^TWII"] = official_taiex[sorted_dates[-1]]
+    except Exception:
+        pass
 
     return latest_prices, hist_close
 
