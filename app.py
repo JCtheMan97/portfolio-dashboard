@@ -290,7 +290,7 @@ def load_market_data(tickers, min_lookback_days):
     start_date = today - timedelta(days=int(min_lookback_days))
     start_date_str = start_date.strftime('%Y-%m-%d')
 
-    benchmark_tickers = ["^TWII"]
+    benchmark_tickers = ["^TWII", "0050.TW"]
     all_tickers = list(set(tickers + benchmark_tickers))
 
     live_prices = {}
@@ -1003,6 +1003,15 @@ if hist_close is not None and not hist_close.empty:
 
     twii_prev_close = prev_closes.get("^TWII", current_twii_index)
     twii_daily_return = ((current_twii_index - twii_prev_close) / twii_prev_close) * 100
+
+    # ── 穩健大盤今日漲跌幅校正機制 ──
+    # 因 yfinance 的 ^TWII (加權指數) 歷史數據常有日期缺漏 (例如 7/14 缺失，被 ffill 填為 7/13)
+    # 導致個股與大盤的前收盤基準日期不對齊 (個股前收對齊 7/14，大盤前收卻對齊 7/13)，造成大盤今日回報率被算成跨日累計值。
+    # 這裡引入代表性 ETF "0050.TW" 做為 fallback 校正：若兩者報酬率差距大於 0.3%，則自動採用 0050.TW 的當日報酬率做為大盤回報代表。
+    if "0050.TW" in latest_prices and "0050.TW" in prev_closes:
+        twii_fallback_return = ((latest_prices["0050.TW"] - prev_closes["0050.TW"]) / prev_closes["0050.TW"]) * 100
+        if abs(twii_daily_return - twii_fallback_return) > 0.3:
+            twii_daily_return = twii_fallback_return
 
     # Individual calculations
     active_stock_df['Current_Price'] = active_stock_df['Ticker'].map(latest_prices).astype(float).round(2)
