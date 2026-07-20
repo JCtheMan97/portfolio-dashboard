@@ -72,11 +72,12 @@ if not check_password():
 ASSET_HISTORY_FILE_PATH = os.path.join(os.path.dirname(__file__), 'asset_history.csv')
 
 def track_weekly_assets(total_assets, total_liability, stock_value, net_equity):
-    """每週自動記錄一次資產狀況 (對齊週日版，週六日不開盤，週日最準確)"""
+    """每週自動記錄一次資產狀況 (以真實日期/週日結算，絕不超前推算未來日期)"""
     today = date.today()
-    # 自動歸整為當週的週日
-    sunday_of_week = today + timedelta(days=(6 - today.weekday()))
-    target_date_str = sunday_of_week.isoformat()
+    today_str = today.isoformat()
+    
+    # 紀錄當下真實發生日期 (不提前計算未來週日)
+    target_date_str = today_str
     
     new_row = {
         "Date": target_date_str,
@@ -93,22 +94,27 @@ def track_weekly_assets(total_assets, total_liability, stock_value, net_equity):
     else:
         try:
             df = pd.read_csv(ASSET_HISTORY_FILE_PATH)
+            # 清除未來日期
+            df['Date'] = df['Date'].astype(str).str.replace(" (預估)", "").str.strip()
+            df = df[df['Date'] <= today_str]
             if df.empty or len(df) < 5 or df['Date'].nunique() < 5:
                 trigger_rebuild = True
         except Exception:
             trigger_rebuild = True
 
     if trigger_rebuild:
-        # A. 自癒重建邏輯 (保留已有日期，向最早日期往前補齊，對齊週日)
+        # A. 自癒重建邏輯 (保留已有日期，剔除未來日期，向最早日期往前補齊)
         existing_rows = []
         if os.path.exists(ASSET_HISTORY_FILE_PATH):
             try:
                 raw_df = pd.read_csv(ASSET_HISTORY_FILE_PATH)
                 raw_df['Date'] = raw_df['Date'].astype(str).str.replace(" (預估)", "").str.strip()
+                raw_df = raw_df[raw_df['Date'] <= today_str]
                 existing_rows = raw_df.to_dict('records')
             except:
                 pass
         
+        sunday_of_week = today if today.weekday() == 6 else today - timedelta(days=today.weekday() + 1)
         base_date = sunday_of_week
         if existing_rows:
             try:
@@ -140,10 +146,13 @@ def track_weekly_assets(total_assets, total_liability, stock_value, net_equity):
         df_rebuilt['Date'] = pd.to_datetime(df_rebuilt['Date'])
         df_rebuilt = df_rebuilt.sort_values(by='Date').drop_duplicates(subset=['Date'], keep='last').reset_index(drop=True)
         df_rebuilt['Date'] = df_rebuilt['Date'].dt.date.map(lambda x: x.isoformat())
+        df_rebuilt = df_rebuilt[df_rebuilt['Date'] <= today_str]
         df_rebuilt.to_csv(ASSET_HISTORY_FILE_PATH, index=False)
         df = df_rebuilt
     else:
         df = pd.read_csv(ASSET_HISTORY_FILE_PATH)
+        df['Date'] = df['Date'].astype(str).str.replace(" (預估)", "").str.strip()
+        df = df[df['Date'] <= today_str]
         if "Is_Estimated" not in df.columns:
             df["Is_Estimated"] = False
             if len(df) >= 4:
@@ -152,8 +161,9 @@ def track_weekly_assets(total_assets, total_liability, stock_value, net_equity):
                 df["Is_Estimated"] = True
 
     try:
-        # B. 寫入或覆蓋本週日數據：若本週日已經存在，以最新數據覆蓋；否則追加一行
+        # B. 寫入或覆蓋當前數據：過濾掉未來日期
         df['Date'] = df['Date'].astype(str).str.replace(" (預估)", "").str.strip()
+        df = df[df['Date'] <= today_str]
         if "Is_Estimated" not in df.columns:
             df["Is_Estimated"] = False
             
@@ -164,6 +174,7 @@ def track_weekly_assets(total_assets, total_liability, stock_value, net_equity):
         else:
             df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
         
+        df = df[df['Date'] <= today_str]
         df = df.sort_values(by='Date').drop_duplicates(subset=['Date'], keep='last').reset_index(drop=True)
         df.to_csv(ASSET_HISTORY_FILE_PATH, index=False)
     except Exception:
@@ -312,7 +323,7 @@ def load_market_data(tickers, min_lookback_days):
     start_date = today - timedelta(days=int(min_lookback_days))
     start_date_str = start_date.strftime('%Y-%m-%d')
 
-    benchmark_tickers = ["^TWII", "0050.TW"]
+    benchmark_tickers = ["^TWII", "0050.TW", "^TWOII", "006201.TWO"]
     all_tickers = list(set(tickers + benchmark_tickers))
 
     live_prices = {}
@@ -1049,13 +1060,20 @@ if hist_close is not None and not hist_close.empty:
     twii_daily_return = ((current_twii_index - twii_prev_close) / twii_prev_close) * 100
 
     # ── 穩健大盤今日漲跌幅校正機制 ──
-    # 因 yfinance 的 ^TWII (加權指數) 歷史數據常有日期缺漏 (例如 7/14 缺失，被 ffill 填為 7/13)
-    # 導致個股與大盤的前收盤基準日期不對齊 (個股前收對齊 7/14，大盤前收卻對齊 7/13)，造成大盤今日回報率被算成跨日累計值。
-    # 這裡引入代表性 ETF "0050.TW" 做為 fallback 校正：若兩者報酬率差距大於 0.3%，則自動採用 0050.TW 的當日報酬率做為大盤回報代表。
     if "0050.TW" in latest_prices and "0050.TW" in prev_closes:
         twii_fallback_return = ((latest_prices["0050.TW"] - prev_closes["0050.TW"]) / prev_closes["0050.TW"]) * 100
         if abs(twii_daily_return - twii_fallback_return) > 0.3:
             twii_daily_return = twii_fallback_return
+
+    # ── 中小櫃買 (富櫃50) 漲跌幅計算 ──
+    otc_current = latest_prices.get("^TWOII", latest_prices.get("006201.TWO", 0.0))
+    otc_prev = prev_closes.get("^TWOII", prev_closes.get("006201.TWO", otc_current))
+    if "006201.TWO" in latest_prices and "006201.TWO" in prev_closes and prev_closes["006201.TWO"] > 0:
+        otc_daily_return = ((latest_prices["006201.TWO"] - prev_closes["006201.TWO"]) / prev_closes["006201.TWO"]) * 100
+    elif otc_prev > 0 and otc_current > 0:
+        otc_daily_return = ((otc_current - otc_prev) / otc_prev) * 100
+    else:
+        otc_daily_return = 0.0
 
     # Individual calculations
     active_stock_df['Current_Price'] = active_stock_df['Ticker'].map(latest_prices).astype(float).round(2)
@@ -1426,7 +1444,7 @@ if hist_close is not None and not hist_close.empty:
                 use_container_width=True,
                 height=320
             )
-        st.caption(f"👉 今日投資組合總損益: **NT$ {total_portfolio_daily_pnl:+,.0f} ({total_portfolio_daily_return:+.2f}%)** | 今日大盤: **{twii_daily_return:+.2f}%** (💡 註: 報價預設快取 15 分鐘。盤中若欲同步最新即時股價，請點選左側 Sidebar 最下方的【⚡ 強制清空快取並同步最新股價】按鈕)")
+        st.caption(f"👉 今日投資組合總損益: **NT$ {total_portfolio_daily_pnl:+,.0f} ({total_portfolio_daily_return:+.2f}%)** | 今日加權: **{twii_daily_return:+.2f}%** | 中小櫃買 (富櫃50): **{otc_daily_return:+.2f}%** (💡 註: 報價預設快取 15 分鐘。盤中若欲同步最新即時股價，請點選左側 Sidebar 最下方的【⚡ 強制清空快取並同步最新股價】按鈕)")
 
         # ------------------------------------------------------------
         # 【第二部分：資金與負債現狀】
@@ -1672,6 +1690,8 @@ if hist_close is not None and not hist_close.empty:
                 
                 if is_est:
                     x_labels.append(f"{date_str} (預估)")
+                elif date_str == today_str and date.today().weekday() < 6:
+                    x_labels.append(f"{date_str} (今日即時)")
                 else:
                     x_labels.append(date_str)
             
