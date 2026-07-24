@@ -161,12 +161,21 @@ def track_weekly_assets(total_assets, total_liability, stock_value, net_equity):
                 df["Is_Estimated"] = True
 
     try:
-        # B. 寫入或覆蓋當前數據：過濾掉未來日期
+        # B. 寫入或覆蓋當前數據：確保本週週間 (週一~週六) 永遠只保留一筆最新的動態「今日即時」點
         df['Date'] = df['Date'].astype(str).str.replace(" (預估)", "").str.strip()
         df = df[df['Date'] <= today_str]
         if "Is_Estimated" not in df.columns:
             df["Is_Estimated"] = False
             
+        last_completed_sunday = today if today.weekday() == 6 else today - timedelta(days=today.weekday() + 1)
+        last_sunday_str = last_completed_sunday.isoformat()
+        
+        # 若為週間 (週一~週六)，自動清理上次歷史週日之後的舊週間紀錄 (如把昨天的 7/20 替換為今天的 7/21)
+        if today.weekday() < 6:
+            weekday_mask = df['Date'] > last_sunday_str
+            if weekday_mask.any():
+                df = df[~weekday_mask].copy()
+                
         if target_date_str in df['Date'].values:
             df.loc[df['Date'] == target_date_str, ["Total_Assets", "Total_Liability", "Stock_Value", "Net_Equity", "Is_Estimated"]] = [
                 new_row["Total_Assets"], new_row["Total_Liability"], new_row["Stock_Value"], new_row["Net_Equity"], False
@@ -186,6 +195,36 @@ def track_weekly_assets(total_assets, total_liability, stock_value, net_equity):
 CSV_FILE_PATH = os.path.join(os.path.dirname(__file__), 'portfolio_data.csv')
 
 LOANS_FILE_PATH = os.path.join(os.path.dirname(__file__), 'loans_data.csv')
+
+APP_CONFIG_FILE_PATH = os.path.join(os.path.dirname(__file__), 'app_config.json')
+
+def load_app_config():
+    """載入系統配置檔 (具有備援保護與自動修復機制，防止 App 休眠重置時現金資料丟失)"""
+    default_config = {"current_cash": 0.0}
+    if not os.path.exists(APP_CONFIG_FILE_PATH):
+        return default_config
+    try:
+        with open(APP_CONFIG_FILE_PATH, 'r', encoding='utf-8') as f:
+            cfg = json.load(f)
+            if isinstance(cfg, dict):
+                return cfg
+    except Exception:
+        pass
+    return default_config
+
+def save_app_config(key_values):
+    """持久化保存系統配置 (採用原子寫檔，防止寫檔中斷導致 JSON 損毀)"""
+    try:
+        cfg = load_app_config()
+        cfg.update(key_values)
+        tmp_path = APP_CONFIG_FILE_PATH + ".tmp"
+        with open(tmp_path, 'w', encoding='utf-8') as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        if os.path.exists(tmp_path):
+            os.replace(tmp_path, APP_CONFIG_FILE_PATH)
+        return True
+    except Exception:
+        return False
 
 # ============================================================
 # Dynamic Ticker name mapping from stocks_list.txt
@@ -626,16 +665,8 @@ if 'prev_scenario_id' not in st.session_state:
         st.session_state.prev_scenario_id = 2 # Default to Scenario 3
 
 if 'current_cash' not in st.session_state:
-    _cfg_path = os.path.join(os.path.dirname(__file__), 'app_config.json')
-    try:
-        if os.path.exists(_cfg_path):
-            with open(_cfg_path, 'r', encoding='utf-8') as f:
-                _cfg = json.load(f)
-            st.session_state.current_cash = float(_cfg.get('current_cash', 0.0))
-        else:
-            st.session_state.current_cash = 0.0
-    except Exception:
-        st.session_state.current_cash = 0.0
+    _cfg = load_app_config()
+    st.session_state.current_cash = float(_cfg.get('current_cash', 0.0))
 
 chosen_scenario_id = st.sidebar.selectbox(
     "選擇資產情境模式 (載入後可於下方直接修改)",
@@ -654,6 +685,7 @@ if chosen_scenario_id != st.session_state.prev_scenario_id:
     if chosen_scenario_id in SCENARIO_DATABASE:
         preset = SCENARIO_DATABASE[chosen_scenario_id]
         st.session_state.current_cash = preset["current_cash"]
+        save_app_config({"current_cash": preset["current_cash"]})
         preset_loans = []
         for idx, l in enumerate(preset["loans"]):
             preset_loans.append({
@@ -689,20 +721,14 @@ _cash_input = st.sidebar.number_input(
 )
 if _cash_input != st.session_state.current_cash:
     st.session_state.current_cash = _cash_input
+    save_app_config({"current_cash": _cash_input})
+
 if st.sidebar.button("💾 保存現金設定", key="save_cash_btn"):
-    _cfg_path = os.path.join(os.path.dirname(__file__), 'app_config.json')
-    try:
-        cfg = {}
-        if os.path.exists(_cfg_path):
-            with open(_cfg_path, 'r', encoding='utf-8') as f:
-                cfg = json.load(f)
-        cfg['current_cash'] = _cash_input
-        with open(_cfg_path, 'w', encoding='utf-8') as f:
-            json.dump(cfg, f, ensure_ascii=False, indent=2)
+    if save_app_config({"current_cash": _cash_input}):
         st.session_state.current_cash = _cash_input
-        st.sidebar.success("現金設定已保存！")
-    except Exception as e:
-        st.sidebar.error(f"保存失敗: {e}")
+        st.sidebar.success("現金設定已持久化保存！")
+    else:
+        st.sidebar.error("保存失敗，請檢查權限")
 
 # We load active_stock_df here briefly to calculate price ratios for auto-margin updates
 try:
