@@ -715,7 +715,8 @@ if chosen_scenario_id != st.session_state.prev_scenario_id:
 
 # Sidebar editable parameters
 def _on_cash_change():
-    save_app_config({"current_cash": float(st.session_state.current_cash), "prev_scenario_id": st.session_state.prev_scenario_id})
+    st.session_state.prev_scenario_id = 0 # 自動切換為「自訂模式」
+    save_app_config({"current_cash": float(st.session_state.current_cash), "prev_scenario_id": 0})
 
 st.sidebar.markdown("### 💵 現金調整")
 st.sidebar.number_input(
@@ -727,7 +728,8 @@ st.sidebar.number_input(
 )
 
 if st.sidebar.button("💾 保存現金設定", key="save_cash_btn"):
-    if save_app_config({"current_cash": float(st.session_state.current_cash), "prev_scenario_id": st.session_state.prev_scenario_id}):
+    st.session_state.prev_scenario_id = 0 # 自動切換為「自訂模式」
+    if save_app_config({"current_cash": float(st.session_state.current_cash), "prev_scenario_id": 0}):
         st.sidebar.success("現金設定已持久化保存！")
     else:
         st.sidebar.error("保存失敗，請檢查權限")
