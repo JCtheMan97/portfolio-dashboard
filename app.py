@@ -658,14 +658,17 @@ def _sync_loan_to_session(idx, row_data):
     st.session_state[f"l_start_{idx}"] = str(row_data.get('Start_Date', ''))
 
 # Initialize scenario details state
+_cfg = load_app_config()
+
 if 'prev_scenario_id' not in st.session_state:
-    if os.path.exists(LOANS_FILE_PATH):
+    if 'prev_scenario_id' in _cfg:
+        st.session_state.prev_scenario_id = int(_cfg['prev_scenario_id'])
+    elif os.path.exists(LOANS_FILE_PATH):
         st.session_state.prev_scenario_id = 0
     else:
         st.session_state.prev_scenario_id = 2 # Default to Scenario 3
 
 if 'current_cash' not in st.session_state:
-    _cfg = load_app_config()
     st.session_state.current_cash = float(_cfg.get('current_cash', 0.0))
 
 chosen_scenario_id = st.sidebar.selectbox(
@@ -685,7 +688,7 @@ if chosen_scenario_id != st.session_state.prev_scenario_id:
     if chosen_scenario_id in SCENARIO_DATABASE:
         preset = SCENARIO_DATABASE[chosen_scenario_id]
         st.session_state.current_cash = preset["current_cash"]
-        save_app_config({"current_cash": preset["current_cash"]})
+        save_app_config({"current_cash": preset["current_cash"], "prev_scenario_id": chosen_scenario_id})
         preset_loans = []
         for idx, l in enumerate(preset["loans"]):
             preset_loans.append({
@@ -711,21 +714,20 @@ if chosen_scenario_id != st.session_state.prev_scenario_id:
         st.rerun()
 
 # Sidebar editable parameters
+def _on_cash_change():
+    save_app_config({"current_cash": float(st.session_state.current_cash), "prev_scenario_id": st.session_state.prev_scenario_id})
+
 st.sidebar.markdown("### 💵 現金調整")
-_cash_input = st.sidebar.number_input(
+st.sidebar.number_input(
     "手邊持有閒置現金 (NT$)",
-    value=float(st.session_state.current_cash),
     step=10000.0,
     format="%.2f",
-    key="cash_input_widget"
+    key="current_cash",
+    on_change=_on_cash_change
 )
-if _cash_input != st.session_state.current_cash:
-    st.session_state.current_cash = _cash_input
-    save_app_config({"current_cash": _cash_input})
 
 if st.sidebar.button("💾 保存現金設定", key="save_cash_btn"):
-    if save_app_config({"current_cash": _cash_input}):
-        st.session_state.current_cash = _cash_input
+    if save_app_config({"current_cash": float(st.session_state.current_cash), "prev_scenario_id": st.session_state.prev_scenario_id}):
         st.sidebar.success("現金設定已持久化保存！")
     else:
         st.sidebar.error("保存失敗，請檢查權限")
