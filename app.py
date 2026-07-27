@@ -199,7 +199,7 @@ LOANS_FILE_PATH = os.path.join(os.path.dirname(__file__), 'loans_data.csv')
 APP_CONFIG_FILE_PATH = os.path.join(os.path.dirname(__file__), 'app_config.json')
 
 def load_app_config():
-    """載入系統配置檔 (具備雙重備援保護與 CSV 備份對齊，防止休眠喚醒重置時現金遺失)"""
+    """載入系統配置檔 (僅存取 app_config.json，預設現金 0.0，不碰 portfolio_data.csv)"""
     default_config = {"current_cash": 0.0, "prev_scenario_id": 0}
     cfg = default_config.copy()
     if os.path.exists(APP_CONFIG_FILE_PATH):
@@ -210,22 +210,10 @@ def load_app_config():
                     cfg.update(loaded)
         except Exception:
             pass
-    
-    # 雙重備援：若 app_config 無現金或為0，嘗試從 portfolio_data.csv 的 REALIZED_CASH 讀取備份
-    if float(cfg.get('current_cash', 0.0)) == 0.0 and os.path.exists(CSV_FILE_PATH):
-        try:
-            p_df = pd.read_csv(CSV_FILE_PATH)
-            cash_row = p_df[p_df['Ticker'] == 'REALIZED_CASH']
-            if not cash_row.empty and 'Avg_Cost' in cash_row.columns:
-                saved_cash = float(cash_row.iloc[0]['Avg_Cost'])
-                if saved_cash != 0.0:
-                    cfg['current_cash'] = saved_cash
-        except Exception:
-            pass
     return cfg
 
 def save_app_config(key_values):
-    """持久化保存系統配置 (原子寫檔 + CSV 雙重同步寫入)"""
+    """持久化保存系統配置 (純粹原子寫入 app_config.json)"""
     try:
         cfg = load_app_config()
         cfg.update(key_values)
@@ -234,16 +222,6 @@ def save_app_config(key_values):
             json.dump(cfg, f, ensure_ascii=False, indent=2)
         if os.path.exists(tmp_path):
             os.replace(tmp_path, APP_CONFIG_FILE_PATH)
-            
-        # 同步雙重備份至 portfolio_data.csv 裡的 REALIZED_CASH 欄位 (Avg_Cost)
-        if 'current_cash' in key_values and os.path.exists(CSV_FILE_PATH):
-            try:
-                p_df = pd.read_csv(CSV_FILE_PATH)
-                if 'REALIZED_CASH' in p_df['Ticker'].values:
-                    p_df.loc[p_df['Ticker'] == 'REALIZED_CASH', 'Avg_Cost'] = float(key_values['current_cash'])
-                    p_df.to_csv(CSV_FILE_PATH, index=False)
-            except Exception:
-                pass
         return True
     except Exception:
         return False
