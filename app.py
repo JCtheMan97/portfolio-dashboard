@@ -172,6 +172,18 @@ def track_weekly_assets(total_assets, total_liability, stock_value, net_equity):
         
         # 若為週間 (週一~週六)，自動清理上次歷史週日之後的舊週間紀錄 (如把昨天的 7/20 替換為今天的 7/21)
         if today.weekday() < 6:
+            # 檢查並補齊漏記的上週日結算紀錄 (例如週日若沒開看板，自動補上上週日點)
+            if last_sunday_str not in df['Date'].values and last_completed_sunday < today:
+                sunday_row = {
+                    "Date": last_sunday_str,
+                    "Total_Assets": round(total_assets),
+                    "Total_Liability": round(total_liability),
+                    "Stock_Value": round(stock_value),
+                    "Net_Equity": round(net_equity),
+                    "Is_Estimated": False
+                }
+                df = pd.concat([df, pd.DataFrame([sunday_row])], ignore_index=True)
+                
             weekday_mask = df['Date'] > last_sunday_str
             if weekday_mask.any():
                 df = df[~weekday_mask].copy()
