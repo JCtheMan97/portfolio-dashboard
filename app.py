@@ -727,6 +727,8 @@ st.sidebar.number_input(
     key="current_cash",
     on_change=_on_cash_change
 )
+if st.session_state.current_cash == 0:
+    st.sidebar.caption("💡 提示：目前現金為 0。若有手邊閒置未動用資金，請於上方填寫。")
 
 if st.sidebar.button("💾 保存現金設定", key="save_cash_btn"):
     st.session_state.prev_scenario_id = 0 # 自動切換為「自訂模式」
@@ -1489,7 +1491,9 @@ if hist_close is not None and not hist_close.empty:
         with cap_cols[1]:
             render_metric_card("庫存現股總市值", f"NT$ {total_stock_market_value:,.0f}", "持股總現值", "#38bdf8")
         with cap_cols[2]:
-            render_metric_card("手邊持有閒置現金", f"NT$ {current_cash:,.0f}", "未動用現金", "#38bdf8")
+            cash_card_val = f"NT$ {current_cash:,.0f}" if current_cash != 0 else "NT$ 0 (待輸入)"
+            cash_card_sub = "未動用現金" if current_cash != 0 else "💡 可於左側邊欄輸入補充"
+            render_metric_card("手邊持有閒置現金", cash_card_val, cash_card_sub, "#38bdf8")
         with cap_cols[3]:
             render_metric_card("實際融資負債總額", f"NT$ {total_active_debt:,.0f}", "全部貸款負債", "#fb7185")
         with cap_cols[4]:
