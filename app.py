@@ -1503,7 +1503,7 @@ if hist_close is not None and not hist_close.empty:
         with cap_cols[1]:
             render_metric_card("庫存現股總市值", f"NT$ {total_stock_market_value:,.0f}", "持股總現值", "#38bdf8")
         with cap_cols[2]:
-            cash_card_val = f"NT$ {current_cash:,.0f}" if current_cash != 0 else "NT$ 0 (待輸入)"
+            cash_card_val = f"NT$ {current_cash:,.0f}" if current_cash != 0 else "NT$ 0 <span style='font-size: 14px; font-weight: 500; opacity: 0.75;'>(待輸入)</span>"
             cash_card_sub = "未動用現金" if current_cash != 0 else "💡 可於左側邊欄輸入補充"
             render_metric_card("手邊持有閒置現金", cash_card_val, cash_card_sub, "#38bdf8")
         with cap_cols[3]:
