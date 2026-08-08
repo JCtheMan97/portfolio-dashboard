@@ -161,7 +161,7 @@ def track_weekly_assets(total_assets, total_liability, stock_value, net_equity):
                 df["Is_Estimated"] = True
 
     try:
-        # B. 寫入或覆蓋當前數據：確保本週週間 (週一~週六) 永遠只保留一筆最新的動態「今日即時」點
+        # B. 寫入或覆蓋當前數據：維護乾淨的每週日歷史紀錄與本週唯一動態點
         df['Date'] = df['Date'].astype(str).str.replace(" (預估)", "").str.strip()
         df = df[df['Date'] <= today_str]
         if "Is_Estimated" not in df.columns:
@@ -170,20 +170,8 @@ def track_weekly_assets(total_assets, total_liability, stock_value, net_equity):
         last_completed_sunday = today if today.weekday() == 6 else today - timedelta(days=today.weekday() + 1)
         last_sunday_str = last_completed_sunday.isoformat()
         
-        # 若為週間 (週一~週六)，自動清理上次歷史週日之後的舊週間紀錄 (如把昨天的 7/20 替換為今天的 7/21)
+        # 若為週間 (週一~週六)，自動清理上次歷史週日之後的舊週間紀錄 (維持本週僅一筆今日即時點)
         if today.weekday() < 6:
-            # 檢查並補齊漏記的上週日結算紀錄 (例如週日若沒開看板，自動補上上週日點)
-            if last_sunday_str not in df['Date'].values and last_completed_sunday < today:
-                sunday_row = {
-                    "Date": last_sunday_str,
-                    "Total_Assets": round(total_assets),
-                    "Total_Liability": round(total_liability),
-                    "Stock_Value": round(stock_value),
-                    "Net_Equity": round(net_equity),
-                    "Is_Estimated": False
-                }
-                df = pd.concat([df, pd.DataFrame([sunday_row])], ignore_index=True)
-                
             weekday_mask = df['Date'] > last_sunday_str
             if weekday_mask.any():
                 df = df[~weekday_mask].copy()
