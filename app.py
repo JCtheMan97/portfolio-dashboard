@@ -71,124 +71,154 @@ if not check_password():
 
 ASSET_HISTORY_FILE_PATH = os.path.join(os.path.dirname(__file__), 'asset_history.csv')
 
-def track_weekly_assets(total_assets, total_liability, stock_value, net_equity):
-    """每週自動記錄一次資產狀況 (以真實日期/週日結算，絕不超前推算未來日期)"""
+def get_portfolio_value_on_date(hist_df, portfolio_df, target_date_str):
+    """
+    根據真實歷史交易日收盤價與持股明細，如實推算指定日期的持股總市值。
+    絕不虛構任何數字，若無歷史行情則安全回傳 0.0。
+    """
+    if hist_df is None or hist_df.empty or portfolio_df is None or portfolio_df.empty:
+        return 0.0
+    try:
+        target_dt = pd.to_datetime(target_date_str)
+        idx = hist_df.index
+        if target_dt in idx:
+            chosen_dt = target_dt
+        else:
+            preceding = idx[idx <= target_dt]
+            if preceding.empty:
+                return 0.0
+            chosen_dt = preceding[-1]
+            
+        total_val = 0.0
+        for _, row in portfolio_df[portfolio_df['Ticker'] != 'REALIZED_CASH'].iterrows():
+            ticker = row['Ticker'].strip().upper()
+            shares = float(row.get('Shares', 0.0))
+            if shares <= 0:
+                continue
+
+            # 嚴格校對買進日期：若歷史結算日早於買進日，表示該時點尚未建倉，不計入市值
+            buy_date_str = str(row.get('Buy_Date', '')).strip()
+            if buy_date_str:
+                try:
+                    b_date = pd.to_datetime(buy_date_str)
+                    if chosen_dt < b_date:
+                        continue
+                except Exception:
+                    pass
+
+            if ticker in hist_df.columns:
+                val = hist_df.loc[chosen_dt, ticker]
+                if isinstance(val, (pd.Series, np.ndarray)):
+                    val = val.iloc[-1]
+                price = float(val)
+                if not np.isnan(price) and price > 0:
+                    total_val += shares * price
+        return total_val
+    except Exception:
+        return 0.0
+
+def track_weekly_assets(total_assets, total_liability, stock_value, net_equity,
+                        hist_close=None, portfolio_df=None, current_cash=0.0):
+    """
+    真實每週資產紀錄與自動缺漏回溯 (Auto-Backfill)：
+    1. 絕不虛構任何 mock 數據（移除舊有線性衰減 demo 假資料）。
+    2. 若歷史記錄存在未開網頁而漏掉的每週日節點，調用真實歷史收盤價 (hist_close) 如實補齊。
+    3. 安全維護「本週即時動態點」，絕不覆蓋或誤刪過去已結算的任何每週歷史點。
+    """
     today = date.today()
     today_str = today.isoformat()
     
-    # 紀錄當下真實發生日期 (不提前計算未來週日)
-    target_date_str = today_str
-    
-    new_row = {
-        "Date": target_date_str,
-        "Total_Assets": round(total_assets),
-        "Total_Liability": round(total_liability),
-        "Stock_Value": round(stock_value),
-        "Net_Equity": round(net_equity),
+    # 讀取現有歷史紀錄
+    df = pd.DataFrame(columns=["Date", "Total_Assets", "Total_Liability", "Stock_Value", "Net_Equity", "Is_Estimated"])
+    if os.path.exists(ASSET_HISTORY_FILE_PATH):
+        try:
+            raw_df = pd.read_csv(ASSET_HISTORY_FILE_PATH)
+            if not raw_df.empty and 'Date' in raw_df.columns:
+                raw_df['Date'] = raw_df['Date'].astype(str).str.replace(" (預估)", "").str.strip()
+                raw_df = raw_df[raw_df['Date'] <= today_str]
+                if "Is_Estimated" not in raw_df.columns:
+                    raw_df["Is_Estimated"] = False
+                df = raw_df.copy()
+        except Exception:
+            pass
+
+    # A. 針對歷史缺漏週次進行真實回溯補齊 (Auto-Backfill using 100% Real Historical Close)
+    backfilled_rows = []
+    if hist_close is not None and not hist_close.empty and portfolio_df is not None and not portfolio_df.empty:
+        # 計算歷史回溯起始日：以現有最新紀錄日期（若無紀錄則往回追溯至多 12 週）
+        if not df.empty:
+            valid_dates = [d for d in df['Date'].tolist() if re.match(r'^\d{4}-\d{2}-\d{2}$', str(d))]
+            if valid_dates:
+                latest_recorded = max(datetime.strptime(d, '%Y-%m-%d').date() for d in valid_dates)
+            else:
+                latest_recorded = today - timedelta(days=7 * 12)
+        else:
+            latest_recorded = today - timedelta(days=7 * 12)
+
+        # 找出從 latest_recorded 到 today 之間的所有週日
+        curr_check = latest_recorded + timedelta(days=1)
+        while curr_check < today:
+            if curr_check.weekday() == 6:  # 每週日結算點
+                check_str = curr_check.isoformat()
+                if check_str not in df['Date'].values:
+                    # 依據該週日當時的真實行情計算
+                    real_stock_val = get_portfolio_value_on_date(hist_close, portfolio_df, check_str)
+                    if real_stock_val > 0:
+                        real_total_assets = real_stock_val + float(current_cash)
+                        real_net_equity = real_total_assets - float(total_liability)
+                        backfilled_rows.append({
+                            "Date": check_str,
+                            "Total_Assets": round(real_total_assets),
+                            "Total_Liability": round(float(total_liability)),
+                            "Stock_Value": round(real_stock_val),
+                            "Net_Equity": round(real_net_equity),
+                            "Is_Estimated": False  # 真實歷史行情計算，非虛構
+                        })
+            curr_check += timedelta(days=1)
+
+    if backfilled_rows:
+        df = pd.concat([df, pd.DataFrame(backfilled_rows)], ignore_index=True)
+
+    # B. 更新「本週動態點」或「今日週日結算點」
+    # 嚴格保護歷史：上週日（含）以前的紀錄全部原樣保留，絕不刪除！
+    last_completed_sunday = today if today.weekday() == 6 else today - timedelta(days=today.weekday() + 1)
+    last_sunday_str = last_completed_sunday.isoformat()
+
+    # 若今天為週間 (週一~週六)，只過濾掉「本週內 (大於上週日)」的舊暫存點，確保本週僅留當天最新即時點
+    if today.weekday() < 6:
+        df = df[df['Date'] <= last_sunday_str].copy()
+
+    # 寫入或更新今日最新數值
+    new_today_row = {
+        "Date": today_str,
+        "Total_Assets": round(float(total_assets)),
+        "Total_Liability": round(float(total_liability)),
+        "Stock_Value": round(float(stock_value)),
+        "Net_Equity": round(float(net_equity)),
         "Is_Estimated": False
     }
     
-    trigger_rebuild = False
-    if not os.path.exists(ASSET_HISTORY_FILE_PATH):
-        trigger_rebuild = True
+    if today_str in df['Date'].values:
+        df.loc[df['Date'] == today_str, ["Total_Assets", "Total_Liability", "Stock_Value", "Net_Equity", "Is_Estimated"]] = [
+            new_today_row["Total_Assets"], new_today_row["Total_Liability"], new_today_row["Stock_Value"], new_today_row["Net_Equity"], False
+        ]
     else:
-        try:
-            df = pd.read_csv(ASSET_HISTORY_FILE_PATH)
-            # 清除未來日期
-            df['Date'] = df['Date'].astype(str).str.replace(" (預估)", "").str.strip()
-            df = df[df['Date'] <= today_str]
-            if df.empty or len(df) < 5 or df['Date'].nunique() < 5:
-                trigger_rebuild = True
-        except Exception:
-            trigger_rebuild = True
+        df = pd.concat([df, pd.DataFrame([new_today_row])], ignore_index=True)
 
-    if trigger_rebuild:
-        # A. 自癒重建邏輯 (保留已有日期，剔除未來日期，向最早日期往前補齊)
-        existing_rows = []
-        if os.path.exists(ASSET_HISTORY_FILE_PATH):
-            try:
-                raw_df = pd.read_csv(ASSET_HISTORY_FILE_PATH)
-                raw_df['Date'] = raw_df['Date'].astype(str).str.replace(" (預估)", "").str.strip()
-                raw_df = raw_df[raw_df['Date'] <= today_str]
-                existing_rows = raw_df.to_dict('records')
-            except:
-                pass
-        
-        sunday_of_week = today if today.weekday() == 6 else today - timedelta(days=today.weekday() + 1)
-        base_date = sunday_of_week
-        if existing_rows:
-            try:
-                dates_parsed = [datetime.strptime(r['Date'], '%Y-%m-%d').date() for r in existing_rows if '-' in r['Date']]
-                if dates_parsed:
-                    base_date = min(dates_parsed)
-            except:
-                pass
-                
-        demo_rows = []
-        for i in range(4, 0, -1):
-            mock_date = (base_date - timedelta(days=7 * i)).isoformat()
-            demo_rows.append({
-                "Date": mock_date,
-                "Total_Assets": round(total_assets * (1.0 - 0.02 * i)),
-                "Total_Liability": round(total_liability),
-                "Stock_Value": round(stock_value * (1.0 - 0.02 * i)),
-                "Net_Equity": round(net_equity * (1.0 - 0.02 * i)),
-                "Is_Estimated": True
-            })
-            
-        df_rebuilt = pd.DataFrame(demo_rows)
-        if existing_rows:
-            existing_df = pd.DataFrame(existing_rows)
-            if "Is_Estimated" not in existing_df.columns:
-                existing_df["Is_Estimated"] = False
-            df_rebuilt = pd.concat([df_rebuilt, existing_df], ignore_index=True)
-            
-        df_rebuilt['Date'] = pd.to_datetime(df_rebuilt['Date'])
-        df_rebuilt = df_rebuilt.sort_values(by='Date').drop_duplicates(subset=['Date'], keep='last').reset_index(drop=True)
-        df_rebuilt['Date'] = df_rebuilt['Date'].dt.date.map(lambda x: x.isoformat())
-        df_rebuilt = df_rebuilt[df_rebuilt['Date'] <= today_str]
-        df_rebuilt.to_csv(ASSET_HISTORY_FILE_PATH, index=False)
-        df = df_rebuilt
-    else:
-        df = pd.read_csv(ASSET_HISTORY_FILE_PATH)
-        df['Date'] = df['Date'].astype(str).str.replace(" (預估)", "").str.strip()
-        df = df[df['Date'] <= today_str]
-        if "Is_Estimated" not in df.columns:
-            df["Is_Estimated"] = False
-            if len(df) >= 4:
-                df.iloc[:4, df.columns.get_loc("Is_Estimated")] = True
-            else:
-                df["Is_Estimated"] = True
-
+    # C. 乾淨排序與持久化儲存
     try:
-        # B. 寫入或覆蓋當前數據：維護乾淨的每週日歷史紀錄與本週唯一動態點
-        df['Date'] = df['Date'].astype(str).str.replace(" (預估)", "").str.strip()
-        df = df[df['Date'] <= today_str]
-        if "Is_Estimated" not in df.columns:
-            df["Is_Estimated"] = False
-            
-        last_completed_sunday = today if today.weekday() == 6 else today - timedelta(days=today.weekday() + 1)
-        last_sunday_str = last_completed_sunday.isoformat()
-        
-        # 若為週間 (週一~週六)，自動清理上次歷史週日之後的舊週間紀錄 (維持本週僅一筆今日即時點)
-        if today.weekday() < 6:
-            weekday_mask = df['Date'] > last_sunday_str
-            if weekday_mask.any():
-                df = df[~weekday_mask].copy()
-                
-        if target_date_str in df['Date'].values:
-            df.loc[df['Date'] == target_date_str, ["Total_Assets", "Total_Liability", "Stock_Value", "Net_Equity", "Is_Estimated"]] = [
-                new_row["Total_Assets"], new_row["Total_Liability"], new_row["Stock_Value"], new_row["Net_Equity"], False
-            ]
-        else:
-            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-        
+        df['Date'] = df['Date'].astype(str).str.strip()
         df = df[df['Date'] <= today_str]
         df = df.sort_values(by='Date').drop_duplicates(subset=['Date'], keep='last').reset_index(drop=True)
-        df.to_csv(ASSET_HISTORY_FILE_PATH, index=False)
-    except Exception:
-        pass
-    
+        
+        # 使用原子寫入防止中途斷電或多執行緒寫壞 CSV
+        tmp_path = ASSET_HISTORY_FILE_PATH + ".tmp"
+        df.to_csv(tmp_path, index=False)
+        if os.path.exists(tmp_path):
+            os.replace(tmp_path, ASSET_HISTORY_FILE_PATH)
+    except Exception as e:
+        st.sidebar.error(f"⚠️ 每週資產記錄寫入失敗: {e}")
+
     return df
 
 
@@ -433,30 +463,7 @@ def load_market_data(tickers, min_lookback_days):
         pass
 
     return latest_prices, hist_close
-
-def get_portfolio_value_on_date(hist_df, portfolio_df, target_date_str):
-    if hist_df is None or hist_df.empty:
-        return 0.0
-    try:
-        target_dt = pd.to_datetime(target_date_str)
-        idx = hist_df.index
-        if target_dt in idx:
-            chosen_dt = target_dt
-        else:
-            preceding = idx[idx <= target_dt]
-            chosen_dt = preceding[-1] if not preceding.empty else idx[0]
-            
-        total_val = 0.0
-        for _, row in portfolio_df[portfolio_df['Ticker'] != 'REALIZED_CASH'].iterrows():
-            ticker = row['Ticker'].strip().upper()
-            shares = float(row['Shares'])
-            if ticker in hist_df.columns:
-                price = float(hist_df.loc[chosen_dt, ticker])
-                total_val += shares * price
-        return total_val
-    except Exception:
-        return 0.0
-
+# get_portfolio_value_on_date 已定義於檔案前段，具備 Buy_Date 校對與型態防護
 
 # ============================================================
 # Core Functions & Default Loans CSV
@@ -1695,7 +1702,10 @@ if hist_close is not None and not hist_close.empty:
                 total_assets=total_assets_calc,
                 total_liability=total_liability_calc,
                 stock_value=stock_value_calc,
-                net_equity=net_equity_calc
+                net_equity=net_equity_calc,
+                hist_close=hist_close,
+                portfolio_df=active_stock_df,
+                current_cash=current_cash
             )
             
             # 根據下拉選單過濾顯示的數據量
@@ -1713,18 +1723,14 @@ if hist_close is not None and not hist_close.empty:
             stock_w = display_df['Stock_Value'] / 10000
             liability_w = display_df['Total_Liability'] / 10000
             
-            # 建立用於 X 軸顯示的標籤 (讀取 Is_Estimated 欄位判定預估)
+            # 建立用於 X 軸顯示的標籤（以真實日期為準，不虛構標記）
             x_labels = []
             for idx_row, row in display_df.iterrows():
                 date_str = str(row['Date']).replace(" (預估)", "").strip()
-                is_est = row.get('Is_Estimated', False)
-                # 向下相容：若舊資料無此欄位，仍以前 4 筆判定
-                if 'Is_Estimated' not in display_df.columns:
-                    orig_idx = hist_df[hist_df['Date'] == row['Date']].index[0]
-                    is_est = (orig_idx < 4 and date_str != today_str)
+                is_est = bool(row.get('Is_Estimated', False))
                 
                 if is_est:
-                    x_labels.append(f"{date_str} (預估)")
+                    x_labels.append(f"{date_str} (歷史預估)")
                 elif date_str == today_str and date.today().weekday() < 6:
                     x_labels.append(f"{date_str} (今日即時)")
                 else:
@@ -1831,10 +1837,6 @@ if hist_close is not None and not hist_close.empty:
                     # 補足缺失的 Is_Estimated 欄位以向下相容
                     if 'Is_Estimated' not in raw_hist_df.columns:
                         raw_hist_df['Is_Estimated'] = False
-                        if len(raw_hist_df) >= 4:
-                            raw_hist_df.iloc[:4, raw_hist_df.columns.get_loc('Is_Estimated')] = True
-                        else:
-                            raw_hist_df['Is_Estimated'] = True
                             
                     hist_cols_needed = ['Date', 'Total_Assets', 'Total_Liability', 'Stock_Value', 'Net_Equity', 'Is_Estimated']
                     for col in hist_cols_needed:
