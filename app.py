@@ -382,6 +382,54 @@ def get_official_taiex_data():
         pass
     return taiex_dict
 
+def get_official_tpex_data(start_date=None, end_date=None):
+    """從台灣證券櫃檯買賣中心 (TPEx) 官方獲取真實櫃買綜合指數歷史收盤數據 (徹底排除 ETF 除息與折溢價干擾)"""
+    tpex_dict = {}
+    try:
+        if end_date is None:
+            end_date = datetime.now()
+        if start_date is None:
+            start_date = end_date - timedelta(days=90)
+            
+        cur_year = start_date.year
+        cur_month = start_date.month
+        end_year = end_date.year
+        end_month = end_date.month
+
+        months_to_fetch = []
+        while (cur_year < end_year) or (cur_year == end_year and cur_month <= end_month):
+            roc_year = cur_year - 1911
+            date_str = f"{roc_year}/{cur_month:02d}/01"
+            months_to_fetch.append(date_str)
+            if cur_month == 12:
+                cur_year += 1
+                cur_month = 1
+            else:
+                cur_month += 1
+
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        for roc_m in months_to_fetch:
+            try:
+                url = f"https://www.tpex.org.tw/www/zh-tw/afterTrading/tradingIndex?date={roc_m}&response=json"
+                r = requests.get(url, headers=headers, timeout=5).json()
+                tables = r.get('tables', [])
+                if tables and len(tables) > 0:
+                    data = tables[0].get('data', [])
+                    for row in data:
+                        d_parts = str(row[0]).split('/')
+                        if len(d_parts) == 3:
+                            y = int(d_parts[0]) + 1911
+                            m = int(d_parts[1])
+                            d = int(d_parts[2])
+                            dt_str = f"{y:04d}-{m:02d}-{d:02d}"
+                            price_val = float(str(row[4]).replace(',', ''))
+                            tpex_dict[dt_str] = price_val
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return tpex_dict
+
 # ============================================================
 # Caching Data Loading
 # ============================================================
@@ -459,6 +507,20 @@ def load_market_data(tickers, min_lookback_days):
                 sorted_dates = sorted(official_taiex.keys())
                 if sorted_dates:
                     latest_prices["^TWII"] = official_taiex[sorted_dates[-1]]
+    # ── 櫃買中心官方櫃買指數數據校正 (徹底修正 Yahoo Finance ^TWOII 斷訊/損毀，無 ETF 除息偏差) ──
+    try:
+        official_tpex = get_official_tpex_data(start_date, today)
+        if official_tpex:
+            for date_str, price in official_tpex.items():
+                dt = pd.to_datetime(date_str)
+                hist_close.loc[dt, "^TWOII"] = price
+            
+            hist_close = hist_close.sort_index()
+            hist_close = hist_close.ffill().bfill()
+            
+            sorted_tpex_dates = sorted(official_tpex.keys())
+            if sorted_tpex_dates:
+                latest_prices["^TWOII"] = official_tpex[sorted_tpex_dates[-1]]
     except Exception:
         pass
 
@@ -1081,16 +1143,18 @@ if hist_close is not None and not hist_close.empty:
     twii_start_price = float(hist_close["^TWII"].iloc[0]) if "^TWII" in hist_close.columns else 0.0
     twii_period_return = ((current_twii_index - twii_start_price) / twii_start_price) * 100 if twii_start_price > 0 else 0.0
 
-    # 櫃買指數 (^TWOII / 006201.TWO) 區間累積報酬率
+    # ── 中小櫃買 (優先使用官方 TPEx 櫃買綜合指數，徹底排除 ETF 除息與折溢價影響) ──
     otc_period_return = 0.0
     if "^TWOII" in hist_close.columns and float(hist_close["^TWOII"].iloc[0]) > 0:
         otc_start_p = float(hist_close["^TWOII"].iloc[0])
         otc_curr_p = latest_prices.get("^TWOII", float(hist_close["^TWOII"].iloc[-1]))
-        otc_period_return = ((otc_curr_p - otc_start_p) / otc_start_p) * 100
+        if otc_start_p > 0 and otc_curr_p > 0:
+            otc_period_return = ((otc_curr_p - otc_start_p) / otc_start_p) * 100
     elif "006201.TWO" in hist_close.columns and float(hist_close["006201.TWO"].iloc[0]) > 0:
         otc_start_p = float(hist_close["006201.TWO"].iloc[0])
         otc_curr_p = latest_prices.get("006201.TWO", float(hist_close["006201.TWO"].iloc[-1]))
-        otc_period_return = ((otc_curr_p - otc_start_p) / otc_start_p) * 100
+        if otc_start_p > 0 and otc_curr_p > 0:
+            otc_period_return = ((otc_curr_p - otc_start_p) / otc_start_p) * 100
 
     # Daily Return reference
     prev_closes = {}
@@ -1667,7 +1731,7 @@ if hist_close is not None and not hist_close.empty:
                 st.markdown(f"<div style='font-size:12px; color:gray; font-weight:600;'>🏛️ 加權指數 (^TWII) 同期戰況</div>", unsafe_allow_html=True)
                 st.markdown(f"<div style='font-size:16px; font-weight:700; margin-top:5px;'>{twii_period_return:+.2f}% <span style='font-size:13.5px; color:{color_twii}; font-weight:800; margin-left:8px;'>({badge_twii})</span></div>", unsafe_allow_html=True)
             with c_bt3:
-                st.markdown(f"<div style='font-size:12px; color:gray; font-weight:600;'>🏬 中小櫃買 (^TWOII) 同期戰況</div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='font-size:12px; color:gray; font-weight:600;'>🏬 中小櫃買 (櫃買指數) 同期戰況</div>", unsafe_allow_html=True)
                 st.markdown(f"<div style='font-size:16px; font-weight:700; margin-top:5px;'>{otc_period_return:+.2f}% <span style='font-size:13.5px; color:{color_otc}; font-weight:800; margin-left:8px;'>({badge_otc})</span></div>", unsafe_allow_html=True)
 
         # AI Health Check: [槓桿波動與狀態提示]
