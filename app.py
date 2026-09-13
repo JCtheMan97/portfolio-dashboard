@@ -1078,8 +1078,19 @@ if (hist_close is None or hist_close.empty) and tickers:
 if hist_close is not None and not hist_close.empty:
     # Calculations
     current_twii_index = latest_prices.get("^TWII", float(hist_close["^TWII"].iloc[-1]))
-    twii_start_price = float(hist_close["^TWII"].iloc[0])
-    twii_period_return = ((current_twii_index - twii_start_price) / twii_start_price) * 100
+    twii_start_price = float(hist_close["^TWII"].iloc[0]) if "^TWII" in hist_close.columns else 0.0
+    twii_period_return = ((current_twii_index - twii_start_price) / twii_start_price) * 100 if twii_start_price > 0 else 0.0
+
+    # 櫃買指數 (^TWOII / 006201.TWO) 區間累積報酬率
+    otc_period_return = 0.0
+    if "^TWOII" in hist_close.columns and float(hist_close["^TWOII"].iloc[0]) > 0:
+        otc_start_p = float(hist_close["^TWOII"].iloc[0])
+        otc_curr_p = latest_prices.get("^TWOII", float(hist_close["^TWOII"].iloc[-1]))
+        otc_period_return = ((otc_curr_p - otc_start_p) / otc_start_p) * 100
+    elif "006201.TWO" in hist_close.columns and float(hist_close["006201.TWO"].iloc[0]) > 0:
+        otc_start_p = float(hist_close["006201.TWO"].iloc[0])
+        otc_curr_p = latest_prices.get("006201.TWO", float(hist_close["006201.TWO"].iloc[-1]))
+        otc_period_return = ((otc_curr_p - otc_start_p) / otc_start_p) * 100
 
     # Daily Return reference
     prev_closes = {}
@@ -1202,6 +1213,9 @@ if hist_close is not None and not hist_close.empty:
     rf_daily = annual_rf / 252.0
     sortino_ratio = 0.0
     sharpe_ratio = 0.0
+    portfolio_period_return = 0.0
+    excess_vs_twii = 0.0
+    excess_vs_otc = 0.0
 
     if hist_close is not None and not hist_close.empty and len(hist_close) > 5:
         # 建立歷史每日總投資組合市值 (各檔持股市值 + 當前現金)
@@ -1213,6 +1227,11 @@ if hist_close is not None and not hist_close.empty:
                 daily_stock_val += hist_close[t].astype(float) * sh
 
         daily_portfolio_val = daily_stock_val + float(current_cash)
+        if len(daily_portfolio_val) > 0 and float(daily_portfolio_val.iloc[0]) > 0:
+            portfolio_period_return = ((float(daily_portfolio_val.iloc[-1]) - float(daily_portfolio_val.iloc[0])) / float(daily_portfolio_val.iloc[0])) * 100
+            excess_vs_twii = portfolio_period_return - twii_period_return
+            excess_vs_otc = portfolio_period_return - otc_period_return
+
         port_daily_returns = daily_portfolio_val.pct_change().dropna()
         port_daily_returns = port_daily_returns.replace([np.inf, -np.inf], np.nan).dropna()
 
@@ -1631,6 +1650,25 @@ if hist_close is not None and not hist_close.empty:
             render_metric_card("實質股票槓桿", f"{effective_stock_leverage_mv:.2f}x", f"現股市值: {total_stock_market_value/10000:.0f}萬", "#f59e0b" if effective_stock_leverage_mv > 1.2 else "#38bdf8")
         with kpi_cols[5]:
             render_metric_card("本金歸零極限", f"-{wipeout_drop_pct:.1f}%", "現股下跌極限承受力", "#ef4444")
+
+        # ── ⚔️ 大盤戰績對決看板 (Benchmark Comparison Banner) ──
+        badge_twii = f"🚀 領先加權 {excess_vs_twii:+.2f}%" if excess_vs_twii >= 0 else f"📉 落後加權 {excess_vs_twii:+.2f}%"
+        badge_otc = f"🚀 領先櫃買 {excess_vs_otc:+.2f}%" if excess_vs_otc >= 0 else f"📉 落後櫃買 {excess_vs_otc:+.2f}%"
+        color_twii = "#10b981" if excess_vs_twii >= 0 else "#ef4444"
+        color_otc = "#10b981" if excess_vs_otc >= 0 else "#ef4444"
+        color_port = "#10b981" if portfolio_period_return >= 0 else "#ef4444"
+
+        with st.container(border=True):
+            c_bt1, c_bt2, c_bt3 = st.columns([1, 1.25, 1.25])
+            with c_bt1:
+                st.markdown(f"<div style='font-size:12px; color:gray; font-weight:600;'>💼 投組近 {min_lookback_days} 天累積報酬</div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='font-size:22px; font-weight:800; color:{color_port}; margin-top:2px;'>{portfolio_period_return:+.2f}%</div>", unsafe_allow_html=True)
+            with c_bt2:
+                st.markdown(f"<div style='font-size:12px; color:gray; font-weight:600;'>🏛️ 加權指數 (^TWII) 同期戰況</div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='font-size:16px; font-weight:700; margin-top:5px;'>{twii_period_return:+.2f}% <span style='font-size:13.5px; color:{color_twii}; font-weight:800; margin-left:8px;'>({badge_twii})</span></div>", unsafe_allow_html=True)
+            with c_bt3:
+                st.markdown(f"<div style='font-size:12px; color:gray; font-weight:600;'>🏬 中小櫃買 (^TWOII) 同期戰況</div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='font-size:16px; font-weight:700; margin-top:5px;'>{otc_period_return:+.2f}% <span style='font-size:13.5px; color:{color_otc}; font-weight:800; margin-left:8px;'>({badge_otc})</span></div>", unsafe_allow_html=True)
 
         # AI Health Check: [槓桿波動與狀態提示]
         if has_loan:
