@@ -1146,18 +1146,44 @@ if hist_close is not None and not hist_close.empty:
     twii_start_price = float(hist_close["^TWII"].iloc[0]) if "^TWII" in hist_close.columns else 0.0
     twii_period_return = ((current_twii_index - twii_start_price) / twii_start_price) * 100 if twii_start_price > 0 else 0.0
 
-    # ── 中小櫃買 (優先使用官方 TPEx 櫃買綜合指數，徹底排除 ETF 除息與折溢價影響) ──
+    # ── 中小櫃買同期報酬計算 (含異常值熔斷防禦機制) ──
     otc_period_return = 0.0
+    otc_display_name = "中小櫃買 (櫃買指數)"
+
+    etf_period_return = None
+    if "006201.TWO" in hist_close.columns and float(hist_close["006201.TWO"].iloc[0]) > 0:
+        etf_start = float(hist_close["006201.TWO"].iloc[0])
+        etf_curr = latest_prices.get("006201.TWO", float(hist_close["006201.TWO"].iloc[-1]))
+        if etf_start > 0 and etf_curr > 0:
+            etf_period_return = ((etf_curr - etf_start) / etf_start) * 100
+
+    raw_twoii_return = None
     if "^TWOII" in hist_close.columns and float(hist_close["^TWOII"].iloc[0]) > 0:
-        otc_start_p = float(hist_close["^TWOII"].iloc[0])
-        otc_curr_p = latest_prices.get("^TWOII", float(hist_close["^TWOII"].iloc[-1]))
-        if otc_start_p > 0 and otc_curr_p > 0:
-            otc_period_return = ((otc_curr_p - otc_start_p) / otc_start_p) * 100
-    elif "006201.TWO" in hist_close.columns and float(hist_close["006201.TWO"].iloc[0]) > 0:
-        otc_start_p = float(hist_close["006201.TWO"].iloc[0])
-        otc_curr_p = latest_prices.get("006201.TWO", float(hist_close["006201.TWO"].iloc[-1]))
-        if otc_start_p > 0 and otc_curr_p > 0:
-            otc_period_return = ((otc_curr_p - otc_start_p) / otc_start_p) * 100
+        twoii_start = float(hist_close["^TWOII"].iloc[0])
+        twoii_curr = latest_prices.get("^TWOII", float(hist_close["^TWOII"].iloc[-1]))
+        if twoii_start > 0 and twoii_curr > 0:
+            raw_twoii_return = ((twoii_curr - twoii_start) / twoii_start) * 100
+
+    # 🛡️ 智能防護：檢測 Yahoo Finance ^TWOII 是否發生「回傳 269 點舊值導致假性 -37% 崩盤」
+    is_corrupted = False
+    if raw_twoii_return is not None:
+        if raw_twoii_return < -20.0 and (etf_period_return is None or etf_period_return > -15.0):
+            is_corrupted = True
+        elif etf_period_return is not None and abs(raw_twoii_return - etf_period_return) > 15.0:
+            is_corrupted = True
+
+    if (raw_twoii_return is not None) and not is_corrupted:
+        otc_period_return = raw_twoii_return
+        otc_display_name = "中小櫃買 (櫃買指數)"
+    elif etf_period_return is not None:
+        # 觸發保護：切換至含息還原收盤價之富櫃50 (近 90 天無除息，走勢最穩定真實)
+        otc_period_return = etf_period_return
+        otc_display_name = "中小櫃買 (富櫃50)"
+    elif raw_twoii_return is not None:
+        otc_period_return = raw_twoii_return
+        otc_display_name = "中小櫃買 (櫃買指數)"
+    else:
+        otc_period_return = 0.0
 
     # Daily Return reference
     prev_closes = {}
@@ -1734,7 +1760,7 @@ if hist_close is not None and not hist_close.empty:
                 st.markdown(f"<div style='font-size:12px; color:gray; font-weight:600;'>🏛️ 加權指數 (^TWII) 同期戰況</div>", unsafe_allow_html=True)
                 st.markdown(f"<div style='font-size:16px; font-weight:700; margin-top:5px;'>{twii_period_return:+.2f}% <span style='font-size:13.5px; color:{color_twii}; font-weight:800; margin-left:8px;'>({badge_twii})</span></div>", unsafe_allow_html=True)
             with c_bt3:
-                st.markdown(f"<div style='font-size:12px; color:gray; font-weight:600;'>🏬 中小櫃買 (櫃買指數) 同期戰況</div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='font-size:12px; color:gray; font-weight:600;'>🏬 {otc_display_name} 同期戰況</div>", unsafe_allow_html=True)
                 st.markdown(f"<div style='font-size:16px; font-weight:700; margin-top:5px;'>{otc_period_return:+.2f}% <span style='font-size:13.5px; color:{color_otc}; font-weight:800; margin-left:8px;'>({badge_otc})</span></div>", unsafe_allow_html=True)
 
         # AI Health Check: [槓桿波動與狀態提示]
