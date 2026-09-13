@@ -964,7 +964,7 @@ current_cash = st.session_state.current_cash
 
 # Advanced config expander (Updated Risk Free label to Taiwan specific)
 with st.sidebar.expander("🛠️ 進階模型設定"):
-    min_lookback_days = st.number_input("Beta/Alpha 歷史追溯天數 (用於計算歷史與危機模式 Beta 以及 Jensen's Alpha)", value=90, min_value=20, max_value=365)
+    min_lookback_days = st.number_input("風險指標歷史追溯天數 (用於計算 Beta 與年化索提諾比率 Sortino)", value=90, min_value=20, max_value=365)
     
     # Updated default to 1.725% reflecting Taiwan Bank 1-Year Time Deposit Rate
     annual_rf = st.number_input(
@@ -1196,18 +1196,46 @@ if hist_close is not None and not hist_close.empty:
     active_stock_df['Crisis_Beta'] = active_stock_df['Ticker'].map(crisis_betas).round(2)
     portfolio_weighted_crisis_beta = (active_stock_df['Weight(%)'] / 100 * active_stock_df['Crisis_Beta']).sum()
 
-    # Jensen's Alpha
-    rf_period_return = annual_rf * (min_lookback_days / 365) * 100
-    active_stock_df['Start_Price'] = active_stock_df['Ticker'].map(lambda t: float(hist_close[t].iloc[0]) if t in hist_close.columns else latest_prices.get(t, 0.0))
-    
-    total_stock_start_value = (active_stock_df['Shares'] * active_stock_df['Start_Price']).sum()
-    portfolio_start_value = total_stock_start_value + current_cash
-    portfolio_end_value = total_stock_market_value + current_cash
-    
-    portfolio_period_return = ((portfolio_end_value - portfolio_start_value) / portfolio_start_value) * 100 if portfolio_start_value > 0 else 0.0
-    
-    jensen_alpha_period = portfolio_period_return - (rf_period_return + portfolio_weighted_beta * (twii_period_return - rf_period_return))
-    jensen_alpha_annual = jensen_alpha_period * (365 / min_lookback_days)
+    # ------------------------------------------------------------
+    # 🛡️ 索提諾比率 (Sortino Ratio) 與 夏普比率 (Sharpe Ratio) 計算
+    # ------------------------------------------------------------
+    rf_daily = annual_rf / 252.0
+    sortino_ratio = 0.0
+    sharpe_ratio = 0.0
+
+    if hist_close is not None and not hist_close.empty and len(hist_close) > 5:
+        # 建立歷史每日總投資組合市值 (各檔持股市值 + 當前現金)
+        daily_stock_val = pd.Series(0.0, index=hist_close.index)
+        for _, row in active_stock_df.iterrows():
+            t = row['Ticker']
+            sh = float(row.get('Shares', 0))
+            if t in hist_close.columns and sh > 0:
+                daily_stock_val += hist_close[t].astype(float) * sh
+
+        daily_portfolio_val = daily_stock_val + float(current_cash)
+        port_daily_returns = daily_portfolio_val.pct_change().dropna()
+        port_daily_returns = port_daily_returns.replace([np.inf, -np.inf], np.nan).dropna()
+
+        if len(port_daily_returns) >= 5:
+            excess_daily = port_daily_returns - rf_daily
+            mean_excess_annual = float(excess_daily.mean()) * 252.0
+
+            # 總年化波動率與夏普比率
+            total_vol_annual = float(port_daily_returns.std(ddof=1)) * np.sqrt(252.0) if len(port_daily_returns) > 1 else 0.0
+            if total_vol_annual > 1e-6:
+                sharpe_ratio = mean_excess_annual / total_vol_annual
+
+            # 年化下行波動率 (Downside Deviation, 目標值 Target = 無風險利率 rf_daily)
+            downside_diff = np.minimum(0.0, excess_daily)
+            downside_dev_annual = float(np.sqrt((downside_diff ** 2).mean())) * np.sqrt(252.0)
+
+            # 索提諾比率 (年化)
+            if downside_dev_annual > 1e-6:
+                sortino_ratio = mean_excess_annual / downside_dev_annual
+            elif mean_excess_annual > 0:
+                sortino_ratio = 10.0  # 全期無任何下行虧損時的保護邊界
+            else:
+                sortino_ratio = 0.0
 
     # ------------------------------------------------------------
     # 📈 計算持股近 5 個交易日漲跌幅 (融合買入日期與持股成本 Avg_Cost)
@@ -1590,7 +1618,13 @@ if hist_close is not None and not hist_close.empty:
         with kpi_cols[1]:
             render_metric_card("現股未實現 ROI", f"{portfolio_roi:+.1f}%", f"損益: {total_unrealized_pnl/10000:.0f}萬", "#10b981" if portfolio_roi >= 0 else "#ef4444")
         with kpi_cols[2]:
-            render_metric_card("詹森 Alpha (年化)", f"{jensen_alpha_annual:+.1f}%", f"近 {min_lookback_days} 天", "#10b981" if jensen_alpha_annual >= 0 else "#ef4444")
+            if sortino_ratio >= 1.0:
+                sortino_color = "#10b981"
+            elif sortino_ratio >= 0.0:
+                sortino_color = "#38bdf8"
+            else:
+                sortino_color = "#ef4444"
+            render_metric_card("索提諾比率 (年化)", f"{sortino_ratio:.2f}", f"夏普: {sharpe_ratio:.2f} | 近 {min_lookback_days} 天", sortino_color)
         with kpi_cols[3]:
             render_metric_card("組合加權 Beta", f"{portfolio_weighted_beta:.2f}", f"連動度: {portfolio_weighted_beta:.1%}", "#38bdf8")
         with kpi_cols[4]:
