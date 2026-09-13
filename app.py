@@ -507,6 +507,9 @@ def load_market_data(tickers, min_lookback_days):
                 sorted_dates = sorted(official_taiex.keys())
                 if sorted_dates:
                     latest_prices["^TWII"] = official_taiex[sorted_dates[-1]]
+    except Exception:
+        pass
+
     # ── 櫃買中心官方櫃買指數數據校正 (徹底修正 Yahoo Finance ^TWOII 斷訊/損毀，無 ETF 除息偏差) ──
     try:
         official_tpex = get_official_tpex_data(start_date, today)
