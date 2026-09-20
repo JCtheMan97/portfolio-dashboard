@@ -715,6 +715,71 @@ def fetch_twse_tpex_eps_data():
     return eps_data
 
 @st.cache_data(ttl=3600)
+def fetch_twse_tpex_valuation_ratios():
+    """從 TWSE 與 TPEx 官方 OpenAPI 獲取全市場即時本益比 (PE)、殖利率 (Dividend Yield %)、股價淨值比 (PB)"""
+    val_data = {}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+
+    def _to_float(val):
+        try:
+            if val is None or val == "" or val == "N/A" or val == "-":
+                return None
+            return float(str(val).replace(',', ''))
+        except (ValueError, TypeError):
+            return None
+
+    # 1. 台灣證交所上市公司 (TWSE 本益比、殖利率及股價淨值比 BWIBBU_ALL)
+    try:
+        url_twse = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL"
+        r = requests.get(url_twse, headers=headers, timeout=8.0)
+        if r.status_code == 200:
+            for item in r.json():
+                code = str(item.get("Code", "")).strip()
+                if not code:
+                    continue
+                pe = _to_float(item.get("PEratio"))
+                dy = _to_float(item.get("DividendYield"))
+                pb = _to_float(item.get("PBratio"))
+                val_data[code] = {
+                    "code": code,
+                    "name": str(item.get("Name", "")).strip(),
+                    "pe_ratio": pe,
+                    "dividend_yield": dy if dy is not None else 0.0,
+                    "pb_ratio": pb,
+                    "dividend_per_share": None,
+                    "market": "TWSE"
+                }
+    except Exception:
+        pass
+
+    # 2. 證券櫃檯買賣中心上櫃公司 (TPEx 本益比、殖利率及股價淨值比 tpex_mainboard_peratio_analysis)
+    try:
+        url_tpex = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_peratio_analysis"
+        r = requests.get(url_tpex, headers=headers, timeout=8.0)
+        if r.status_code == 200:
+            for item in r.json():
+                code = str(item.get("SecuritiesCompanyCode", "")).strip()
+                if not code:
+                    continue
+                pe = _to_float(item.get("PriceEarningRatio"))
+                dy = _to_float(item.get("YieldRatio"))
+                pb = _to_float(item.get("PriceBookRatio"))
+                dps = _to_float(item.get("DividendPerShare"))
+                val_data[code] = {
+                    "code": code,
+                    "name": str(item.get("CompanyName", "")).strip(),
+                    "pe_ratio": pe,
+                    "dividend_yield": dy if dy is not None else 0.0,
+                    "pb_ratio": pb,
+                    "dividend_per_share": dps,
+                    "market": "TPEx"
+                }
+    except Exception:
+        pass
+
+    return val_data
+
+@st.cache_data(ttl=3600)
 def fetch_stock_monthly_revenue_history(stock_code):
     """獲取特定個股近 24~36 個月之歷史每月營收、MoM 與 YoY (FinMind + MOPS 雙引擎)"""
     records = []
@@ -823,7 +888,8 @@ fetch_mops_stock_monthly_revenue_history = fetch_stock_monthly_revenue_history
 
 @st.cache_data(ttl=3600)
 def fetch_stock_quarterly_history(ticker):
-    """獲取個股歷史季度損益表三率、EPS 與評價資訊 (透過 yfinance 快取)"""
+    """獲取個股歷史季度損益表三率、EPS 與評價資訊 (透過 yfinance 快取，並由官方 OpenAPI 校正殖利率/PE/PB)"""
+    raw_code = ticker.split('.')[0].strip().upper()
     result = {
         "quarters": [],
         "revenue": [],
@@ -837,20 +903,46 @@ def fetch_stock_quarterly_history(ticker):
         "pe_ratio": None,
         "pb_ratio": None,
         "dividend_yield": None,
+        "dividend_per_share": None,
         "roe": None,
         "roa": None,
         "high_52w": None,
         "low_52w": None,
     }
+
+    # 1. 優先從 TWSE / TPEx 官方 OpenAPI 獲取最權威的 殖利率、PE 與 PB
+    try:
+        val_map = fetch_twse_tpex_valuation_ratios()
+        if raw_code in val_map:
+            v = val_map[raw_code]
+            result["pe_ratio"] = v.get("pe_ratio")
+            result["pb_ratio"] = v.get("pb_ratio")
+            result["dividend_yield"] = v.get("dividend_yield")
+            result["dividend_per_share"] = v.get("dividend_per_share")
+    except Exception:
+        pass
+
     try:
         t_obj = yf.Ticker(ticker)
         try:
             info = t_obj.info
-            result["pe_ratio"] = info.get("trailingPE") or info.get("forwardPE")
-            result["pb_ratio"] = info.get("priceToBook")
-            dy = info.get("dividendYield")
-            if dy is not None:
-                result["dividend_yield"] = dy * 100 if dy < 1.0 else dy
+            # 若官方 OpenAPI 缺漏，才使用 yfinance 作為備援
+            if result["pe_ratio"] is None:
+                result["pe_ratio"] = info.get("trailingPE") or info.get("forwardPE")
+            if result["pb_ratio"] is None:
+                result["pb_ratio"] = info.get("priceToBook")
+            
+            # 若官方 OpenAPI 缺漏殖利率，進行 yfinance 多重精確計算備援
+            if result["dividend_yield"] is None:
+                cur_p = info.get("regularMarketPrice") or info.get("currentPrice") or info.get("previousClose")
+                d_rate = info.get("dividendRate") or info.get("trailingAnnualDividendRate")
+                if d_rate and cur_p and cur_p > 0:
+                    result["dividend_yield"] = round((d_rate / cur_p) * 100, 2)
+                else:
+                    dy = info.get("dividendYield")
+                    if dy is not None and dy > 0:
+                        result["dividend_yield"] = round(dy * 100, 2) if dy < 0.20 else round(dy, 2)
+
             roe = info.get("returnOnEquity")
             if roe is not None:
                 result["roe"] = roe * 100
@@ -2716,6 +2808,7 @@ if hist_close is not None and not hist_close.empty:
                     fetch_twse_tpex_monthly_revenue.clear()
                     fetch_twse_tpex_financial_ratios.clear()
                     fetch_twse_tpex_eps_data.clear()
+                    fetch_twse_tpex_valuation_ratios.clear()
                     st.rerun()
 
             # 載入全市場 OpenAPI 數據 (已由 @st.cache_data 快取)
@@ -2723,6 +2816,7 @@ if hist_close is not None and not hist_close.empty:
                 all_monthly_rev = fetch_twse_tpex_monthly_revenue()
                 all_ratios = fetch_twse_tpex_financial_ratios()
                 all_eps = fetch_twse_tpex_eps_data()
+                all_valuations = fetch_twse_tpex_valuation_ratios()
 
             # 整理持股基本面資料框
             fundamental_rows = []
@@ -2765,6 +2859,13 @@ if hist_close is not None and not hist_close.empty:
                 net_income = eps_info.get('net_income', 0.0)
                 eps_quarter = f"{eps_info.get('year', '')}Q{eps_info.get('quarter', '')}" if eps_info.get('year') else ""
 
+                # 官方權威評價與殖利率數據 (TWSE BWIBBU_ALL / TPEx tpex_mainboard_peratio_analysis)
+                val_info = all_valuations.get(raw_code, {})
+                div_yield = val_info.get('dividend_yield')
+                pe_ratio = val_info.get('pe_ratio')
+                pb_ratio = val_info.get('pb_ratio')
+                div_per_share = val_info.get('dividend_per_share')
+
                 # 補強 1：若三率中毛利率或營業利益率為 0，但 eps_info 中有計算值 (針對 TPEx 上櫃股)
                 if gross_margin == 0.0 and eps_info.get('gross_margin', 0.0) > 0:
                     gross_margin = eps_info.get('gross_margin', 0.0)
@@ -2775,7 +2876,7 @@ if hist_close is not None and not hist_close.empty:
 
                 # 補強 2：若仍缺少季度或三率/EPS 為 0 (如特定 KY 股或尚未由 OpenAPI 同步者)，自動調用 yfinance 季度財報補齊
                 final_quarter = ratio_quarter or eps_quarter
-                if gross_margin == 0.0 or eps == 0.0 or not final_quarter:
+                if gross_margin == 0.0 or eps == 0.0 or not final_quarter or div_yield is None or pe_ratio is None:
                     try:
                         q_hist = fetch_stock_quarterly_history(t)
                         if q_hist and q_hist.get("quarters") and len(q_hist["quarters"]) > 0:
@@ -2790,6 +2891,12 @@ if hist_close is not None and not hist_close.empty:
                                 net_margin = q_hist["net_margin"][-1]
                             if eps == 0.0 and q_hist.get("eps") and len(q_hist["eps"]) > 0:
                                 eps = q_hist["eps"][-1]
+                        if div_yield is None and q_hist.get('dividend_yield') is not None:
+                            div_yield = q_hist['dividend_yield']
+                        if pe_ratio is None and q_hist.get('pe_ratio') is not None:
+                            pe_ratio = q_hist['pe_ratio']
+                        if pb_ratio is None and q_hist.get('pb_ratio') is not None:
+                            pb_ratio = q_hist['pb_ratio']
                     except Exception:
                         pass
 
@@ -2818,6 +2925,9 @@ if hist_close is not None and not hist_close.empty:
                     if operating_margin > 15.0:
                         tags.append("🌟 獲利績優")
 
+                if div_yield is not None and div_yield >= 4.0:
+                    tags.append("💰 高殖利率")
+
                 # 營收 vs 毛利 剪刀差標籤 (體質優化 vs 薄利承壓)
                 if yoy < 0 and gross_margin >= 25.0:
                     tags.append("🔄 營收降毛利高")
@@ -2845,6 +2955,10 @@ if hist_close is not None and not hist_close.empty:
                     "稅後淨利率(%)": net_margin,
                     "最新單季EPS(元)": eps,
                     "稅後淨利(千元)": net_income / 1000.0 if net_income else 0.0,
+                    "殖利率(%)": div_yield if div_yield is not None else 0.0,
+                    "每股股利(元)": div_per_share,
+                    "本益比(PE)": pe_ratio,
+                    "股價淨值比(PB)": pb_ratio,
                     "營收備註": note,
                     "標籤": " ".join(tags) if tags else "穩健"
                 })
@@ -2862,6 +2976,7 @@ if hist_close is not None and not hist_close.empty:
             
             yoy_boom_df = fund_df[fund_df['營收年增(YoY%)'] >= 20.0]
             high_margin_df = fund_df[fund_df['毛利率(%)'] >= 30.0]
+            high_yield_df = fund_df[fund_df['殖利率(%)'] >= 4.0]
             yoy_decay_df = fund_df[fund_df['營收年增(YoY%)'] <= -10.0]
 
             col_kpi1, col_kpi2, col_kpi3, col_kpi4 = st.columns(4)
@@ -2889,12 +3004,12 @@ if hist_close is not None and not hist_close.empty:
                     value_color="#8b5cf6" if len(high_margin_df) > 0 else "#6b7280"
                 )
             with col_kpi4:
-                decay_names = ", ".join([f"{r['股票名稱']}({r['營收年增(YoY%)']:.1f}%)" for _, r in yoy_decay_df.head(3).iterrows()]) or "無顯著衰退標的"
+                hy_names = ", ".join([f"{r['股票名稱']}({r['殖利率(%)']:.1f}%)" for _, r in high_yield_df.head(3).iterrows()]) or "暫無高殖利率(≥4%)標的"
                 render_metric_card(
-                    "⚠️ 營收衰退預警股 (YoY<-10%)",
-                    f"{len(yoy_decay_df)} 檔",
-                    decay_names,
-                    value_color="#ef4444" if len(yoy_decay_df) > 0 else "#10b981"
+                    "💰 高殖利率收益股 (殖利率≥4%)",
+                    f"{len(high_yield_df)} 檔",
+                    hy_names,
+                    value_color="#10b981" if len(high_yield_df) > 0 else "#6b7280"
                 )
 
             st.markdown("---")
@@ -2904,7 +3019,7 @@ if hist_close is not None and not hist_close.empty:
             # ------------------------------------------------------------
             st.markdown("#### 📋 【第二部分：庫存持股基本面與營收全景總表】")
             
-            # 快速篩選按鈕 (包含營收下降毛利上升、營收上升毛利下降)
+            # 快速篩選按鈕 (包含營收下降毛利上升、營收上升毛利下降、高殖利率)
             filter_option = st.radio(
                 "🔍 快速維度篩選：",
                 [
@@ -2912,6 +3027,7 @@ if hist_close is not None and not hist_close.empty:
                     "📈 營收雙增 (MoM>0 & YoY>0)", 
                     "🔥 營收年增雙位數 (YoY≥10%)", 
                     "💎 高毛利股 (毛利≥30%)", 
+                    "💰 高殖利率股 (殖利率≥4%)",
                     "🔄 營收降但毛利高 (YoY<0 且 毛利≥25%)", 
                     "⚡ 營收增但毛利低 (YoY>0 且 毛利<20%)", 
                     "⚠️ 營收衰退警戒 (YoY<0%)"
@@ -2927,6 +3043,8 @@ if hist_close is not None and not hist_close.empty:
                 display_df = display_df[display_df['營收年增(YoY%)'] >= 10.0]
             elif filter_option == "💎 高毛利股 (毛利≥30%)":
                 display_df = display_df[display_df['毛利率(%)'] >= 30.0]
+            elif filter_option == "💰 高殖利率股 (殖利率≥4%)":
+                display_df = display_df[display_df['殖利率(%)'] >= 4.0]
             elif filter_option == "🔄 營收降但毛利高 (YoY<0 且 毛利≥25%)":
                 display_df = display_df[(display_df['營收年增(YoY%)'] < 0.0) & (display_df['毛利率(%)'] >= 25.0)]
             elif filter_option == "⚡ 營收增但毛利低 (YoY>0 且 毛利<20%)":
@@ -2939,6 +3057,7 @@ if hist_close is not None and not hist_close.empty:
                 "股票名稱", "Code", "最新市價", "持股市值", "投組權重(%)",
                 "營收月份", "當月營收(千元)", "營收月增(MoM%)", "營收年增(YoY%)", "累計年增(%)",
                 "財報季度", "毛利率(%)", "營業利益率(%)", "稅後淨利率(%)", "最新單季EPS(元)",
+                "殖利率(%)", "本益比(PE)", "股價淨值比(PB)",
                 "標籤"
             ]
             
@@ -2969,6 +3088,9 @@ if hist_close is not None and not hist_close.empty:
                 "營業利益率(%)": "{:.2f}%",
                 "稅後淨利率(%)": "{:.2f}%",
                 "最新單季EPS(元)": "{:+.2f}",
+                "殖利率(%)": lambda x: f"{x:.2f}%" if pd.notna(x) and x > 0 else ("0.00%" if pd.notna(x) and x == 0 else "N/A"),
+                "本益比(PE)": lambda x: f"{x:.1f}" if pd.notna(x) and x > 0 else "N/A",
+                "股價淨值比(PB)": lambda x: f"{x:.2f}" if pd.notna(x) and x > 0 else "N/A",
             }).map(_color_positive_green_negative_red, subset=["營收月增(MoM%)", "營收年增(YoY%)", "累計年增(%)", "營業利益率(%)", "稅後淨利率(%)", "最新單季EPS(元)"])
 
             st.dataframe(styled_table, use_container_width=True, height=min(450, 40 + len(table_to_format) * 35))
@@ -3011,8 +3133,10 @@ if hist_close is not None and not hist_close.empty:
                         value_color="#3b82f6"
                     )
                 with d_col3:
-                    pe_str = f"{q_hist['pe_ratio']:.1f} 倍" if q_hist['pe_ratio'] else "N/A"
-                    pb_str = f"{q_hist['pb_ratio']:.2f} 倍" if q_hist['pb_ratio'] else "N/A"
+                    pe_val = selected_row.get('本益比(PE)')
+                    pb_val = selected_row.get('股價淨值比(PB)')
+                    pe_str = f"{pe_val:.1f} 倍" if pd.notna(pe_val) and pe_val > 0 else (f"{q_hist['pe_ratio']:.1f} 倍" if q_hist.get('pe_ratio') else "N/A")
+                    pb_str = f"{pb_val:.2f} 倍" if pd.notna(pb_val) and pb_val > 0 else (f"{q_hist['pb_ratio']:.2f} 倍" if q_hist.get('pb_ratio') else "N/A")
                     render_metric_card(
                         "⚖️ 評價指標 (PE / PB)",
                         f"PE: {pe_str}",
@@ -3020,13 +3144,23 @@ if hist_close is not None and not hist_close.empty:
                         value_color="#8b5cf6"
                     )
                 with d_col4:
-                    dy_str = f"{q_hist['dividend_yield']:.2f}%" if q_hist['dividend_yield'] is not None else "N/A"
-                    roe_str = f"{q_hist['roe']:.1f}%" if q_hist['roe'] is not None else "N/A"
+                    dy_val = selected_row.get('殖利率(%)')
+                    if pd.notna(dy_val) and dy_val > 0:
+                        dy_str = f"{dy_val:.2f}%"
+                    elif pd.notna(dy_val) and dy_val == 0.0:
+                        dy_str = "0.00% (未配息)"
+                    elif q_hist.get('dividend_yield') is not None and q_hist['dividend_yield'] > 0:
+                        dy_str = f"{q_hist['dividend_yield']:.2f}%"
+                    else:
+                        dy_str = "0.00% (未配息)"
+                    dps_val = selected_row.get('每股股利(元)')
+                    dps_str = f" | 每股配息 {dps_val:.2f}元" if pd.notna(dps_val) and dps_val > 0 else ""
+                    roe_str = f"{q_hist['roe']:.1f}%" if q_hist.get('roe') is not None else "N/A"
                     render_metric_card(
                         "🌱 股利殖利率與 ROE",
                         f"殖利率: {dy_str}",
-                        f"ROE: {roe_str} | 最新單季EPS: {selected_row['最新單季EPS(元)']:+.2f}元",
-                        value_color="#f59e0b"
+                        f"ROE: {roe_str}{dps_str} | EPS: {selected_row['最新單季EPS(元)']:+.2f}元",
+                        value_color="#10b981" if (pd.notna(dy_val) and dy_val >= 4.0) else "#f59e0b"
                     )
 
                 # 圖表展示：雙欄佈局
