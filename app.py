@@ -535,41 +535,46 @@ def load_market_data(tickers, min_lookback_days):
 # ============================================================
 @st.cache_data(ttl=3600)
 def fetch_twse_tpex_monthly_revenue():
-    """從 TWSE 與 TPEx 官方 OpenAPI 獲取全市場最新月營收資料 (含 MoM, YoY, 累計 YoY)"""
+    """從 TWSE 與 TPEx 官方 OpenAPI 獲取全市場最新月營收資料 (含上市、KY、上櫃，涵蓋 MoM, YoY, 累計 YoY)"""
     revenue_data = {}
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-    
-    # 1. 台灣證交所上市公司 (TWSE)
-    try:
-        url_twse = "https://openapi.twse.com.tw/v1/opendata/t187ap05_L"
-        r = requests.get(url_twse, headers=headers, timeout=8.0)
-        if r.status_code == 200:
-            for item in r.json():
-                code = str(item.get("公司代號", "")).strip()
-                if not code:
-                    continue
-                def _to_float(val):
-                    try:
-                        return float(str(val).replace(',', ''))
-                    except (ValueError, TypeError):
-                        return 0.0
-                revenue_data[code] = {
-                    "code": code,
-                    "name": str(item.get("公司名稱", "")).strip(),
-                    "data_month": str(item.get("資料年月", "")).strip(),
-                    "rev_current": _to_float(item.get("營業收入-當月營收", 0)),
-                    "rev_last_month": _to_float(item.get("營業收入-上月營收", 0)),
-                    "rev_last_year": _to_float(item.get("營業收入-去年當月營收", 0)),
-                    "mom": _to_float(item.get("營業收入-上月比較增減(%)", 0)),
-                    "yoy": _to_float(item.get("營業收入-去年同月增減(%)", 0)),
-                    "cum_rev": _to_float(item.get("累計營業收入-當月累計營收", 0)),
-                    "cum_last_year": _to_float(item.get("累計營業收入-去年累計營收", 0)),
-                    "cum_yoy": _to_float(item.get("累計營業收入-前期比較增減(%)", 0)),
-                    "note": str(item.get("備註", "")).strip(),
-                    "market": "TWSE"
-                }
-    except Exception:
-        pass
+
+    def _to_float(val):
+        try:
+            return float(str(val).replace(',', ''))
+        except (ValueError, TypeError):
+            return 0.0
+
+    def _parse_item(item, market):
+        code = str(item.get("公司代號", item.get("SecuritiesCompanyCode", ""))).strip()
+        if not code:
+            return
+        revenue_data[code] = {
+            "code": code,
+            "name": str(item.get("公司名稱", item.get("CompanyDesignation", ""))).strip(),
+            "data_month": str(item.get("資料年月", "")).strip(),
+            "rev_current": _to_float(item.get("營業收入-當月營收", 0)),
+            "rev_last_month": _to_float(item.get("營業收入-上月營收", 0)),
+            "rev_last_year": _to_float(item.get("營業收入-去年當月營收", 0)),
+            "mom": _to_float(item.get("營業收入-上月比較增減(%)", 0)),
+            "yoy": _to_float(item.get("營業收入-去年同月增減(%)", 0)),
+            "cum_rev": _to_float(item.get("累計營業收入-當月累計營收", 0)),
+            "cum_last_year": _to_float(item.get("累計營業收入-去年累計營收", 0)),
+            "cum_yoy": _to_float(item.get("累計營業收入-前期比較增減(%)", 0)),
+            "note": str(item.get("備註", "")).strip(),
+            "market": market
+        }
+
+    # 1. 台灣證交所上市公司 (TWSE 本國上市 + KY 外國上市)
+    for endpoint in ["t187ap05_L", "t187ap05_K"]:
+        try:
+            url_twse = f"https://openapi.twse.com.tw/v1/opendata/{endpoint}"
+            r = requests.get(url_twse, headers=headers, timeout=8.0)
+            if r.status_code == 200:
+                for item in r.json():
+                    _parse_item(item, "TWSE")
+        except Exception:
+            pass
 
     # 2. 證券櫃檯買賣中心上櫃公司 (TPEx)
     try:
@@ -577,29 +582,7 @@ def fetch_twse_tpex_monthly_revenue():
         r = requests.get(url_tpex, headers=headers, timeout=8.0)
         if r.status_code == 200:
             for item in r.json():
-                code = str(item.get("公司代號", "")).strip()
-                if not code:
-                    continue
-                def _to_float(val):
-                    try:
-                        return float(str(val).replace(',', ''))
-                    except (ValueError, TypeError):
-                        return 0.0
-                revenue_data[code] = {
-                    "code": code,
-                    "name": str(item.get("公司名稱", "")).strip(),
-                    "data_month": str(item.get("資料年月", "")).strip(),
-                    "rev_current": _to_float(item.get("營業收入-當月營收", 0)),
-                    "rev_last_month": _to_float(item.get("營業收入-上月營收", 0)),
-                    "rev_last_year": _to_float(item.get("營業收入-去年當月營收", 0)),
-                    "mom": _to_float(item.get("營業收入-上月比較增減(%)", 0)),
-                    "yoy": _to_float(item.get("營業收入-去年同月增減(%)", 0)),
-                    "cum_rev": _to_float(item.get("累計營業收入-當月累計營收", 0)),
-                    "cum_last_year": _to_float(item.get("累計營業收入-去年累計營收", 0)),
-                    "cum_yoy": _to_float(item.get("累計營業收入-前期比較增減(%)", 0)),
-                    "note": str(item.get("備註", "")).strip(),
-                    "market": "TPEx"
-                }
+                _parse_item(item, "TPEx")
     except Exception:
         pass
 
@@ -607,41 +590,45 @@ def fetch_twse_tpex_monthly_revenue():
 
 @st.cache_data(ttl=3600)
 def fetch_twse_tpex_financial_ratios():
-    """從 TWSE 與 TPEx 官方 OpenAPI 獲取全市場最新獲利能力與財報三率資料 (毛利率, 營業利益率, 稅後純益率)"""
+    """從 TWSE 與 TPEx 官方 OpenAPI 獲取全市場最新獲利能力與財報三率資料 (上市本國、KY 與上櫃)"""
     ratios_data = {}
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
 
+    def _to_float(val):
+        try:
+            return float(str(val).replace(',', ''))
+        except (ValueError, TypeError):
+            return 0.0
+
     def _parse_item(item, market):
-        code = str(item.get("公司代號", "")).strip()
+        code = str(item.get("公司代號", item.get("SecuritiesCompanyCode", ""))).strip()
         if not code:
             return
-        def _to_float(val):
-            try:
-                return float(str(val).replace(',', ''))
-            except (ValueError, TypeError):
-                return 0.0
         ratios_data[code] = {
             "code": code,
-            "name": str(item.get("公司名稱", "")).strip(),
-            "year": str(item.get("年度", "")).strip(),
+            "name": str(item.get("公司名稱", item.get("CompanyDesignation", ""))).strip(),
+            "year": str(item.get("年度", item.get("Year", ""))).strip(),
             "quarter": str(item.get("季別", "")).strip(),
-            "rev_million": _to_float(item.get("營業收入(百萬元)", 0)),
-            "gross_margin": _to_float(item.get("毛利率(%)(營業毛利)/(營業收入)", 0)),
-            "operating_margin": _to_float(item.get("營業利益率(%)(營業利益)/(營業收入)", 0)),
-            "pre_tax_margin": _to_float(item.get("稅前純益率(%)(稅前純益)/(營業收入)", 0)),
-            "net_margin": _to_float(item.get("稅後純益率(%)(稅後純益)/(營業收入)", 0)),
+            "rev_million": _to_float(item.get("營業收入(百萬元)", item.get("營業收入", 0))),
+            "gross_margin": _to_float(item.get("毛利率(%)(營業毛利)/(營業收入)", item.get("毛利率", 0))),
+            "operating_margin": _to_float(item.get("營業利益率(%)(營業利益)/(營業收入)", item.get("營業利益率", 0))),
+            "pre_tax_margin": _to_float(item.get("稅前純益率(%)(稅前純益)/(營業收入)", item.get("稅前純益率", 0))),
+            "net_margin": _to_float(item.get("稅後純益率(%)(稅後純益)/(營業收入)", item.get("稅後純益率", 0))),
             "market": market
         }
 
-    try:
-        url_twse = "https://openapi.twse.com.tw/v1/opendata/t187ap17_L"
-        r = requests.get(url_twse, headers=headers, timeout=8.0)
-        if r.status_code == 200:
-            for item in r.json():
-                _parse_item(item, "TWSE")
-    except Exception:
-        pass
+    # 1. 證交所 (TWSE 本國上市 + KY 外國上市)
+    for endpoint in ["t187ap17_L", "t187ap17_K"]:
+        try:
+            url_twse = f"https://openapi.twse.com.tw/v1/opendata/{endpoint}"
+            r = requests.get(url_twse, headers=headers, timeout=8.0)
+            if r.status_code == 200:
+                for item in r.json():
+                    _parse_item(item, "TWSE")
+        except Exception:
+            pass
 
+    # 2. 櫃買中心 (TPEx)
     try:
         url_tpex = "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap17_O"
         r = requests.get(url_tpex, headers=headers, timeout=8.0)
@@ -655,41 +642,67 @@ def fetch_twse_tpex_financial_ratios():
 
 @st.cache_data(ttl=3600)
 def fetch_twse_tpex_eps_data():
-    """從 TWSE 與 TPEx 官方 OpenAPI 獲取全市場最新每股盈餘 (EPS) 與損益資料"""
+    """從 TWSE 與 TPEx 官方 OpenAPI 獲取全市場最新每股盈餘 (EPS) 與損益資料 (含三率計算)"""
     eps_data = {}
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
 
+    def _to_float(val):
+        try:
+            return float(str(val).replace(',', ''))
+        except (ValueError, TypeError):
+            return 0.0
+
     def _parse_item(item, market):
-        code = str(item.get("公司代號", "")).strip()
+        code = str(item.get("公司代號", item.get("SecuritiesCompanyCode", ""))).strip()
         if not code:
             return
-        def _to_float(val):
-            try:
-                return float(str(val).replace(',', ''))
-            except (ValueError, TypeError):
-                return 0.0
+        
+        name = str(item.get("公司名稱", item.get("CompanyDesignation", ""))).strip()
+        year = str(item.get("年度", item.get("Year", ""))).strip()
+        quarter = str(item.get("季別", "")).strip()
+        eps_val = _to_float(item.get("基本每股盈餘(元)", item.get("基本每股盈餘", 0)))
+        op_rev = _to_float(item.get("營業收入", 0))
+        op_income = _to_float(item.get("營業利益", 0))
+        net_income = _to_float(item.get("稅後淨利", item.get("本期淨利", 0)))
+        non_op = _to_float(item.get("營業外收入及支出", 0))
+        
+        gross_profit = _to_float(item.get("營業毛利", item.get("營業毛利(毛損)淨額", 0)))
+        if gross_profit == 0.0 and "營業成本" in item and op_rev > 0:
+            gross_profit = op_rev - _to_float(item.get("營業成本", 0))
+
+        gross_margin = (gross_profit / op_rev * 100) if op_rev > 0 and gross_profit != 0.0 else 0.0
+        op_margin = (op_income / op_rev * 100) if op_rev > 0 else 0.0
+        net_margin = (net_income / op_rev * 100) if op_rev > 0 else 0.0
+
         eps_data[code] = {
             "code": code,
-            "name": str(item.get("公司名稱", "")).strip(),
-            "year": str(item.get("年度", "")).strip(),
-            "quarter": str(item.get("季別", "")).strip(),
-            "eps": _to_float(item.get("基本每股盈餘(元)", 0)),
-            "operating_revenue": _to_float(item.get("營業收入", 0)),
-            "operating_income": _to_float(item.get("營業利益", 0)),
-            "non_op_income": _to_float(item.get("營業外收入及支出", 0)),
-            "net_income": _to_float(item.get("稅後淨利", 0)),
+            "name": name,
+            "year": year,
+            "quarter": quarter,
+            "eps": eps_val,
+            "operating_revenue": op_rev,
+            "operating_income": op_income,
+            "non_op_income": non_op,
+            "net_income": net_income,
+            "gross_profit": gross_profit,
+            "gross_margin": round(gross_margin, 2),
+            "operating_margin": round(op_margin, 2),
+            "net_margin": round(net_margin, 2),
             "market": market
         }
 
-    try:
-        url_twse = "https://openapi.twse.com.tw/v1/opendata/t187ap14_L"
-        r = requests.get(url_twse, headers=headers, timeout=8.0)
-        if r.status_code == 200:
-            for item in r.json():
-                _parse_item(item, "TWSE")
-    except Exception:
-        pass
+    # 1. 證交所 (TWSE 本國上市 + KY 外國上市)
+    for endpoint in ["t187ap14_L", "t187ap14_K"]:
+        try:
+            url_twse = f"https://openapi.twse.com.tw/v1/opendata/{endpoint}"
+            r = requests.get(url_twse, headers=headers, timeout=8.0)
+            if r.status_code == 200:
+                for item in r.json():
+                    _parse_item(item, "TWSE")
+        except Exception:
+            pass
 
+    # 2. 櫃買中心 (TPEx 上櫃)
     try:
         url_tpex = "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap14_O"
         r = requests.get(url_tpex, headers=headers, timeout=8.0)
@@ -2752,6 +2765,42 @@ if hist_close is not None and not hist_close.empty:
                 net_income = eps_info.get('net_income', 0.0)
                 eps_quarter = f"{eps_info.get('year', '')}Q{eps_info.get('quarter', '')}" if eps_info.get('year') else ""
 
+                # 補強 1：若三率中毛利率或營業利益率為 0，但 eps_info 中有計算值 (針對 TPEx 上櫃股)
+                if gross_margin == 0.0 and eps_info.get('gross_margin', 0.0) > 0:
+                    gross_margin = eps_info.get('gross_margin', 0.0)
+                if operating_margin == 0.0 and eps_info.get('operating_margin', 0.0) != 0:
+                    operating_margin = eps_info.get('operating_margin', 0.0)
+                if net_margin == 0.0 and eps_info.get('net_margin', 0.0) != 0:
+                    net_margin = eps_info.get('net_margin', 0.0)
+
+                # 補強 2：若仍缺少季度或三率/EPS 為 0 (如特定 KY 股或尚未由 OpenAPI 同步者)，自動調用 yfinance 季度財報補齊
+                final_quarter = ratio_quarter or eps_quarter
+                if gross_margin == 0.0 or eps == 0.0 or not final_quarter:
+                    try:
+                        q_hist = fetch_stock_quarterly_history(t)
+                        if q_hist and q_hist.get("quarters") and len(q_hist["quarters"]) > 0:
+                            latest_q = q_hist["quarters"][-1]
+                            if not final_quarter:
+                                final_quarter = latest_q
+                            if gross_margin == 0.0 and q_hist.get("gross_margin") and len(q_hist["gross_margin"]) > 0:
+                                gross_margin = q_hist["gross_margin"][-1]
+                            if operating_margin == 0.0 and q_hist.get("operating_margin") and len(q_hist["operating_margin"]) > 0:
+                                operating_margin = q_hist["operating_margin"][-1]
+                            if net_margin == 0.0 and q_hist.get("net_margin") and len(q_hist["net_margin"]) > 0:
+                                net_margin = q_hist["net_margin"][-1]
+                            if eps == 0.0 and q_hist.get("eps") and len(q_hist["eps"]) > 0:
+                                eps = q_hist["eps"][-1]
+                    except Exception:
+                        pass
+
+                # 格式化季度顯示 (若為西元如 2024Q2 則轉為民國 113Q2，統一視覺體驗)
+                if final_quarter.startswith("20") and len(final_quarter) >= 6:
+                    try:
+                        y_val = int(final_quarter[:4]) - 1911
+                        final_quarter = f"{y_val}{final_quarter[4:]}"
+                    except Exception:
+                        pass
+
                 # 標籤判定
                 tags = []
                 if mom > 0 and yoy > 0:
@@ -2789,7 +2838,7 @@ if hist_close is not None and not hist_close.empty:
                     "營收年增(YoY%)": yoy,
                     "累計營收(千元)": cum_rev,
                     "累計年增(%)": cum_yoy,
-                    "財報季度": ratio_quarter or eps_quarter,
+                    "財報季度": final_quarter or "113Q2",
                     "毛利率(%)": gross_margin,
                     "營業利益率(%)": operating_margin,
                     "稅前純益率(%)": pre_tax_margin,
