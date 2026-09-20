@@ -702,19 +702,62 @@ def fetch_twse_tpex_eps_data():
     return eps_data
 
 @st.cache_data(ttl=3600)
-def fetch_mops_stock_monthly_revenue_history(stock_code):
-    """從公開資訊觀測站 (MOPS) 獲取特定個股當年與去年各月份營收明細 (免金鑰備援引擎)"""
+def fetch_stock_monthly_revenue_history(stock_code):
+    """獲取特定個股近 24~36 個月之歷史每月營收、MoM 與 YoY (FinMind + MOPS 雙引擎)"""
     records = []
-    today = date.today()
-    cur_year = today.year - 1911
-    
+    # 1. 優先透過 FinMind 開放 API 抓取近 3 年 (36 個月) 完整每月營收
+    try:
+        today = date.today()
+        start_date_str = (today - timedelta(days=1100)).strftime('%Y-01-01')
+        url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockMonthRevenue&data_id={stock_code}&start_date={start_date_str}"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        r = requests.get(url, headers=headers, timeout=6.0)
+        if r.status_code == 200:
+            data = r.json().get("data", [])
+            if data and len(data) >= 3:
+                sorted_data = sorted(data, key=lambda x: x.get("date", ""))
+                for i, d in enumerate(sorted_data):
+                    rev = float(d.get("revenue", 0))
+                    m_year = int(d.get("revenue_year", 0))
+                    m_month = int(d.get("revenue_month", 0))
+                    date_label = f"{m_year}/{m_month:02d}"
+                    
+                    # 計算 MoM
+                    mom = 0.0
+                    if i > 0 and sorted_data[i-1].get("revenue", 0) > 0:
+                        prev_rev = float(sorted_data[i-1]["revenue"])
+                        mom = ((rev - prev_rev) / prev_rev) * 100
+                    
+                    # 計算 YoY (尋找去年同月的記錄)
+                    yoy = 0.0
+                    for prev_d in sorted_data[:i]:
+                        if int(prev_d.get("revenue_year", 0)) == m_year - 1 and int(prev_d.get("revenue_month", 0)) == m_month:
+                            py_rev = float(prev_d.get("revenue", 0))
+                            if py_rev > 0:
+                                yoy = ((rev - py_rev) / py_rev) * 100
+                            break
+
+                    records.append({
+                        "year": m_year,
+                        "month": m_month,
+                        "date_label": date_label,
+                        "revenue": rev / 1000.0, # 轉為千元
+                        "mom": mom,
+                        "yoy": yoy
+                    })
+                if records:
+                    return records
+    except Exception:
+        pass
+
+    # 2. 備援：公開資訊觀測站 (MOPS)
+    cur_year = date.today().year - 1911
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Referer": "https://mops.twse.com.tw/mops/web/t05st10_ifrs",
         "Content-Type": "application/x-www-form-urlencoded",
     }
-    
-    for y in [cur_year, cur_year - 1]:
+    for y in [cur_year, cur_year - 1, cur_year - 2]:
         try:
             post_data = {
                 "encodeURIComponent": "1",
@@ -761,6 +804,9 @@ def fetch_mops_stock_monthly_revenue_history(stock_code):
             continue
     records.sort(key=lambda x: (x["year"], x["month"]))
     return records
+
+# 保留舊函式名稱相容性
+fetch_mops_stock_monthly_revenue_history = fetch_stock_monthly_revenue_history
 
 @st.cache_data(ttl=3600)
 def fetch_stock_quarterly_history(ticker):
@@ -2723,6 +2769,12 @@ if hist_close is not None and not hist_close.empty:
                     if operating_margin > 15.0:
                         tags.append("🌟 獲利績優")
 
+                # 營收 vs 毛利 剪刀差標籤 (體質優化 vs 薄利承壓)
+                if yoy < 0 and gross_margin >= 25.0:
+                    tags.append("🔄 營收降毛利高")
+                elif yoy > 0 and gross_margin < 20.0:
+                    tags.append("⚡ 營收增毛利低")
+
                 fundamental_rows.append({
                     "Ticker": t,
                     "Code": raw_code,
@@ -2803,10 +2855,18 @@ if hist_close is not None and not hist_close.empty:
             # ------------------------------------------------------------
             st.markdown("#### 📋 【第二部分：庫存持股基本面與營收全景總表】")
             
-            # 快速篩選按鈕
+            # 快速篩選按鈕 (包含營收下降毛利上升、營收上升毛利下降)
             filter_option = st.radio(
                 "🔍 快速維度篩選：",
-                ["全部持股", "📈 營收雙增 (MoM>0 & YoY>0)", "🔥 營收年增雙位數 (YoY≥10%)", "💎 高毛利股 (毛利≥30%)", "⚠️ 營收衰退警戒 (YoY<0%)"],
+                [
+                    "全部持股", 
+                    "📈 營收雙增 (MoM>0 & YoY>0)", 
+                    "🔥 營收年增雙位數 (YoY≥10%)", 
+                    "💎 高毛利股 (毛利≥30%)", 
+                    "🔄 營收降但毛利高 (YoY<0 且 毛利≥25%)", 
+                    "⚡ 營收增但毛利低 (YoY>0 且 毛利<20%)", 
+                    "⚠️ 營收衰退警戒 (YoY<0%)"
+                ],
                 horizontal=True,
                 key="fundamental_table_filter"
             )
@@ -2818,6 +2878,10 @@ if hist_close is not None and not hist_close.empty:
                 display_df = display_df[display_df['營收年增(YoY%)'] >= 10.0]
             elif filter_option == "💎 高毛利股 (毛利≥30%)":
                 display_df = display_df[display_df['毛利率(%)'] >= 30.0]
+            elif filter_option == "🔄 營收降但毛利高 (YoY<0 且 毛利≥25%)":
+                display_df = display_df[(display_df['營收年增(YoY%)'] < 0.0) & (display_df['毛利率(%)'] >= 25.0)]
+            elif filter_option == "⚡ 營收增但毛利低 (YoY>0 且 毛利<20%)":
+                display_df = display_df[(display_df['營收年增(YoY%)'] > 0.0) & (display_df['毛利率(%)'] < 20.0)]
             elif filter_option == "⚠️ 營收衰退警戒 (YoY<0%)":
                 display_df = display_df[display_df['營收年增(YoY%)'] < 0.0]
 
@@ -2831,6 +2895,9 @@ if hist_close is not None and not hist_close.empty:
             
             table_to_format = display_df[show_cols].copy()
             table_to_format = table_to_format.rename(columns={"Code": "代號"})
+            # 將編號改成從 1 開始
+            table_to_format.index = range(1, len(table_to_format) + 1)
+            table_to_format.index.name = "編號"
 
             # 美化表格樣式
             def _color_positive_green_negative_red(val):
@@ -2873,10 +2940,10 @@ if hist_close is not None and not hist_close.empty:
                 selected_ticker = selected_row['Ticker']
                 selected_name = selected_row['股票名稱']
 
-                # 深度抓取歷史季度數據與評價資訊 (yfinance)
-                with st.spinner(f"⏳ 正在獲取 {selected_name} ({selected_code}) 歷史財報與評價指標..."):
+                # 深度抓取歷史季度數據與評價資訊 (yfinance) 及長週期月營收 (FinMind + MOPS)
+                with st.spinner(f"⏳ 正在獲取 {selected_name} ({selected_code}) 歷史財報與 24~36 個月營收數據..."):
                     q_hist = fetch_stock_quarterly_history(selected_ticker)
-                    mops_monthly = fetch_mops_stock_monthly_revenue_history(selected_code)
+                    mops_monthly = fetch_stock_monthly_revenue_history(selected_code)
 
                 # 個股 4 大指標卡片
                 d_col1, d_col2, d_col3, d_col4 = st.columns(4)
@@ -2915,21 +2982,20 @@ if hist_close is not None and not hist_close.empty:
 
                 # 圖表展示：雙欄佈局
                 chart_tab1, chart_tab2, chart_tab3 = st.tabs([
-                    "📊 每月營收雙軸走勢圖",
+                    "📊 每月營收雙軸走勢圖 (多月份長週期)",
                     "📈 跨季財報三率趨勢圖",
                     "💵 單季 EPS 與獲利走勢圖"
                 ])
 
-                # ── 圖表 1：每月營收雙軸走勢圖 ──
+                # ── 圖表 1：每月營收雙軸走勢圖 (多月份長週期) ──
                 with chart_tab1:
-                    # 若 MOPS 歷史營收有資料，使用 MOPS 歷史數據；否則使用 TWSE 最新月營收呈現
                     if mops_monthly and len(mops_monthly) >= 2:
                         rev_x = [m["date_label"] for m in mops_monthly]
                         rev_y = [m["revenue"] / 1000.0 for m in mops_monthly] # 轉為百萬元
                         mom_y = [m["mom"] for m in mops_monthly]
                         yoy_y = [m["yoy"] for m in mops_monthly]
+                        chart_subtitle = f"共涵蓋近 {len(rev_x)} 個月之完整營收走勢"
                     else:
-                        # 備援：展示當月、上月與去年當月
                         rev_x = ["去年同月", "上月", f"當月 ({selected_row['營收月份']})"]
                         rev_y = [
                             all_monthly_rev.get(selected_code, {}).get('rev_last_year', 0) / 1000.0,
@@ -2938,6 +3004,7 @@ if hist_close is not None and not hist_close.empty:
                         ]
                         mom_y = [0.0, 0.0, selected_row['營收月增(MoM%)']]
                         yoy_y = [0.0, 0.0, selected_row['營收年增(YoY%)']]
+                        chart_subtitle = "展示近月與去年同期對比"
 
                     fig_rev = go.Figure()
                     # 柱狀圖：營收金額
@@ -2955,7 +3022,7 @@ if hist_close is not None and not hist_close.empty:
                         name="營收年增率 (YoY %)",
                         mode="lines+markers",
                         line=dict(color="#10b981", width=2.5),
-                        marker=dict(size=6),
+                        marker=dict(size=5),
                         yaxis="y2"
                     ))
                     # 折線圖：月增率 (MoM)
@@ -2964,17 +3031,17 @@ if hist_close is not None and not hist_close.empty:
                         y=mom_y,
                         name="營收月增率 (MoM %)",
                         mode="lines+markers",
-                        line=dict(color="#f59e0b", width=2, dash="dot"),
-                        marker=dict(size=5),
+                        line=dict(color="#f59e0b", width=1.8, dash="dot"),
+                        marker=dict(size=4),
                         yaxis="y2"
                     ))
                     fig_rev.update_layout(
-                        title=f"📈 {selected_name} ({selected_code}) 每月營收與成長率走勢",
-                        xaxis=dict(title="月份", tickangle=-45),
+                        title=f"📈 {selected_name} ({selected_code}) 每月營收與成長率走勢 ({chart_subtitle})",
+                        xaxis=dict(title="月份 (西元年/月)", tickangle=-45),
                         yaxis=dict(title="單月營收 (百萬元)", side="left", showgrid=True),
                         yaxis2=dict(title="增減率 (%)", side="right", overlaying="y", showgrid=False, zeroline=True, zerolinecolor="rgba(255,255,255,0.2)"),
                         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                        height=420,
+                        height=440,
                         margin=dict(l=40, r=40, t=60, b=40)
                     )
                     st.plotly_chart(fig_rev, use_container_width=True)
@@ -3059,14 +3126,32 @@ if hist_close is not None and not hist_close.empty:
                     else:
                         st.info(f"💡 {selected_name} 最新單季基本每股盈餘 (EPS)：**{selected_row['最新單季EPS(元)']:+.2f} 元**。")
 
-                # 個股體檢診斷筆記
+                # 個股體檢診斷筆記 (包含營收與毛利率剪刀差關係評析)
                 with st.expander(f"📝 【{selected_name} ({selected_code})】 基本面體檢與診斷筆記", expanded=True):
                     diag_mom_text = "月增成長" if selected_row['營收月增(MoM%)'] > 0 else "月增衰退"
                     diag_yoy_text = "年增成長" if selected_row['營收年增(YoY%)'] > 0 else "年增衰退"
                     diag_margin_text = "毛利率高於 30%，具備強大產品競爭力/護城河" if selected_row['毛利率(%)'] >= 30.0 else ("毛利率介於 15%~30%，體質穩健" if selected_row['毛利率(%)'] >= 15.0 else "毛利率低於 15%，屬薄利或成熟競爭市場")
                     
+                    # 剪刀差分析：營收 vs 毛利
+                    gm_change = 0.0
+                    if q_hist["quarters"] and len(q_hist["gross_margin"]) >= 2:
+                        gm_change = q_hist["gross_margin"][-1] - q_hist["gross_margin"][-2]
+                    
+                    yoy_val = selected_row['營收年增(YoY%)']
+                    gm_val = selected_row['毛利率(%)']
+                    
+                    if yoy_val > 0 and (gm_change > 0 or gm_val >= 25.0):
+                        scissor_diag = f"🚀 **【雙引擎擴張】** 營收年增達 **{yoy_val:+.2f}%** 且毛利率維持在 **{gm_val:.2f}%** 高檔（季變動 {gm_change:+.2f}%），顯示產品具備強大市場競爭力與定價話語權，獲利含金量與營收規模同步擴張。"
+                    elif yoy_val < 0 and (gm_change > 0 or gm_val >= 25.0):
+                        scissor_diag = f"🔄 **【營收下降但毛利上升 / 結構轉型優化】** 雖然單月營收年減 **{yoy_val:+.2f}%**，但毛利率達 **{gm_val:.2f}%**（季變動 {gm_change:+.2f}%），呈現「營收降、毛利升」之結構優化特徵。通常代表公司正在主動淘汰低毛利代工訂單、聚焦高附加價值利基型產品，或成本轉嫁效益顯現，體質正在轉佳！"
+                    elif yoy_val > 0 and (gm_change < 0 or gm_val < 20.0):
+                        scissor_diag = f"⚡ **【營收上升但毛利下降 / 薄利競爭或成本承壓】** 營收年增達 **{yoy_val:+.2f}%** 表現亮眼，但毛利率僅 **{gm_val:.2f}%**（季變動 {gm_change:+.2f}%），呈現「營收升、毛利降」之剪刀差。需特別留意是否受原物料成本上漲、產業進入殺價競爭，或擴大出貨低毛利產品導致「營收虛胖、獲利受壓」之風險。"
+                    else:
+                        scissor_diag = f"💀 **【量利齊跌 / 景氣下行警戒】** 營收年減 **{yoy_val:+.2f}%** 且毛利率處於 **{gm_val:.2f}%**（季變動 {gm_change:+.2f}%），面臨需求走弱與利潤率壓縮雙重挑戰，需留意產業景氣落底信號。"
+
                     st.markdown(f"""
                     - **營收動能評等**：當月營收呈現 **{diag_mom_text} ({selected_row['營收月增(MoM%)']:+.2f}%)** 與 **{diag_yoy_text} ({selected_row['營收年增(YoY%)']:+.2f}%)**。累計年增率為 **{selected_row['累計年增(%)']:+.2f}%**。
+                    - **營收與毛利剪刀差診斷**：{scissor_diag}
                     - **本業競爭力與產品毛利**：最新申報毛利率為 **{selected_row['毛利率(%)']:.2f}%**（{diag_margin_text}）。營業利益率為 **{selected_row['營業利益率(%)']:.2f}%**。
                     - **淨利結構檢驗**：稅後淨利率 **{selected_row['稅後淨利率(%)']:.2f}%** 與營業利益率相較，{'業外損益貢獻正面' if selected_row['稅後淨利率(%)'] >= selected_row['營業利益率(%)'] else '業外支出略有侵蝕或所得稅提列'}。
                     - **評價估值水位**：目前本益比約 **{pe_str}**，股價淨值比約 **{pb_str}**。
