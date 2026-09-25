@@ -4164,7 +4164,9 @@ if hist_close is not None and not hist_close.empty:
                 with b_c2:
                     st.metric("最新市價", f"${cur_price:,.2f}" if cur_price > 0 else "N/A")
                 with b_c3:
-                    st.metric(f"當前 {'PE' if use_pe_model else 'PB'}", f"{cur_multiple_val:.2f} 倍" if pd.notna(cur_multiple_val) and cur_multiple_val > 0 else "N/A")
+                    cur_model_label = "PE" if use_pe_model else "PB"
+                    cur_mult_disp = f"{cur_multiple_val:.2f} 倍" if pd.notna(cur_multiple_val) and cur_multiple_val > 0 else "N/A"
+                    st.metric(f"當前 {cur_model_label}", cur_mult_disp)
                 with b_c4:
                     latest_base = base_metric_vals[-1] if base_metric_vals else 0.0
                     st.metric(f"最新 {base_metric_name.split(' ')[0]}", f"${latest_base:.2f}" if latest_base > 0 else "N/A")
@@ -4403,14 +4405,22 @@ if hist_close is not None and not hist_close.empty:
 
                     is_cyclical = any(k in selected_name for k in ["長榮", "陽明", "萬海", "中鋼", "台塑", "南亞", "台化", "友達", "群創", "彩晶", "南亞科", "旺宏", "華邦電"]) or selected_code in ["2603", "2609", "2615", "2002", "1301", "1303", "1326", "2409", "3481", "6116", "2408", "2337", "2344"]
                     cyclical_hint = "（💡 此標的具備顯著**景氣循環股**特徵，循環谷底時 EPS 常暴跌或轉負使本益比失真，建議上方切換至【📊 股價淨值比河流圖 (PB)】捕捉經典『低 PB 谷底逆向佈局』時機！）" if is_cyclical else "（成長股建議以【PE 本益比河流圖】檢視通道位階；若面臨產業劇烈波動或獲利暫時衰退，亦可切換至【PB 淨值比河流圖】檢驗資產底線）"
+                    
+                    non_op_diag = "業外損益貢獻正面" if selected_row['稅後淨利率(%)'] >= selected_row['營業利益率(%)'] else "業外支出略有侵蝕或所得稅提列"
+                    if latest_roa_diag >= 6.0:
+                        lev_diag_desc = "高資產運用效率驅動之優質體質"
+                    elif latest_lev_diag >= 4.0:
+                        lev_diag_desc = "負債槓桿放大推動，需留意財務負擔"
+                    else:
+                        lev_diag_desc = "財務結構穩健健全"
 
                     st.markdown(f"""
                     - **營收動能評等**：當月營收呈現 **{diag_mom_text} ({selected_row['營收月增(MoM%)']:+.2f}%)** 與 **{diag_yoy_text} ({selected_row['營收年增(YoY%)']:+.2f}%)**。累計年增率為 **{selected_row['累計年增(%)']:+.2f}%**。
                     - **營收與毛利剪刀差診斷**：{scissor_diag}
                     - **本業競爭力與產品毛利**：最新申報毛利率為 **{selected_row['毛利率(%)']:.2f}%**（{diag_margin_text}）。營業利益率為 **{selected_row['營業利益率(%)']:.2f}%**。
-                    - **淨利結構檢驗**：稅後淨利率 **{selected_row['稅後淨利率(%)']:.2f}%** 與營業利益率相較，{'業外損益貢獻正面' if selected_row['稅後淨利率(%)'] >= selected_row['營業利益率(%)'] else '業外支出略有侵蝕或所得稅提列'}。
+                    - **淨利結構檢驗**：稅後淨利率 **{selected_row['稅後淨利率(%)']:.2f}%** 與營業利益率相較，{non_op_diag}。
                     - **每股盈餘獲利動能 (EPS)**：最新單季基本每股盈餘為 **{selected_row['最新單季EPS(元)']:+.2f} 元**{cum_eps_note}。
                     - **資本報酬與評價指標**：目前 ROE 約 **{roe_str}**，ROA 約 **{roa_str}**，本益比約 **{pe_str}**，股價淨值比約 **{pb_str}**。
                     - **估值河流圖與位階判定**：目前 PE 位階為 **{pe_zone_txt}**，PB 位階為 **{pb_zone_txt}**。{cyclical_hint}
-                    - **杜邦資本效率與槓桿體質**：最新 ROE 為 **{latest_roe_diag:.2f}%**，ROA 為 **{latest_roa_diag:.2f}%**，權益乘數為 **{latest_lev_diag:.1f} 倍**（{'高資產運用效率驅動之優質體質' if latest_roa_diag >= 6.0 else ('負債槓桿放大推動，需留意財務負擔' if latest_lev_diag >= 4.0 else '財務結構穩健健全'}）。
+                    - **杜邦資本效率與槓桿體質**：最新 ROE 為 **{latest_roe_diag:.2f}%**，ROA 為 **{latest_roa_diag:.2f}%**，權益乘數為 **{latest_lev_diag:.1f} 倍**（{lev_diag_desc}）。
                     """)
