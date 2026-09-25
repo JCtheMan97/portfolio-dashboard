@@ -1015,6 +1015,212 @@ def fetch_stock_quarterly_history(ticker):
     return result
 
 # ============================================================
+# Fundamental Helper for Single Stock (Holdings & Any Market Stock)
+# ============================================================
+def get_single_stock_fundamental_data(
+    ticker_or_code,
+    all_monthly_rev,
+    all_ratios,
+    all_eps,
+    all_valuations,
+    stock_name=None,
+    current_price=0.0,
+    market_val=0.0,
+    weight=0.0,
+    roi=0.0
+):
+    """
+    彙整單一個股之全方位基本面資料（營收、三率、EPS、估值），
+    同時支援庫存持股與全市場觀察標的（台股上市/上櫃/KY 與美股）。
+    """
+    raw_str = str(ticker_or_code).strip().upper()
+    raw_code = raw_str.split('.')[0]
+    
+    # 判斷是否為台股代碼 (全數字，如 2330, 0050, 6547)
+    is_tw_code = raw_code.isdigit()
+    
+    # 決定標準 ticker (含後綴 .TW 或 .TWO)
+    if is_tw_code:
+        if '.' in raw_str:
+            t = raw_str
+        else:
+            val_market = all_valuations.get(raw_code, {}).get("market", "")
+            rev_market = all_monthly_rev.get(raw_code, {}).get("market", "")
+            eps_market = all_eps.get(raw_code, {}).get("market", "")
+            market_type = val_market or rev_market or eps_market
+            
+            if market_type == "TPEx" or f"{raw_code}.TWO" in STOCK_NAMES:
+                t = f"{raw_code}.TWO"
+            else:
+                t = f"{raw_code}.TW"
+    else:
+        # 美股或自訂代號
+        t = raw_str
+
+    # 決定股票名稱
+    name = stock_name
+    if not name or name == "未知個股" or name == raw_code:
+        if t in STOCK_NAMES:
+            name = STOCK_NAMES[t]
+        elif raw_code in STOCK_NAMES:
+            name = STOCK_NAMES[raw_code]
+        elif raw_code in all_monthly_rev and all_monthly_rev[raw_code].get('name'):
+            name = all_monthly_rev[raw_code]['name']
+        elif raw_code in all_valuations and all_valuations[raw_code].get('name'):
+            name = all_valuations[raw_code]['name']
+        elif raw_code in all_eps and all_eps[raw_code].get('name'):
+            name = all_eps[raw_code]['name']
+        else:
+            name = raw_code
+
+    # 營收數據 (來自 TWSE/TPEx OpenAPI)
+    rev_info = all_monthly_rev.get(raw_code, {})
+    rev_cur = rev_info.get('rev_current', 0.0) # 千元
+    rev_last_m = rev_info.get('rev_last_month', 0.0)
+    rev_last_y = rev_info.get('rev_last_year', 0.0)
+    mom = rev_info.get('mom', 0.0)
+    yoy = rev_info.get('yoy', 0.0)
+    cum_rev = rev_info.get('cum_rev', 0.0)
+    cum_yoy = rev_info.get('cum_yoy', 0.0)
+    data_month = rev_info.get('data_month', '')
+    note = rev_info.get('note', '')
+
+    month_display = f"{data_month[:3]}/{data_month[3:]}" if len(data_month) == 5 else (data_month or "N/A")
+
+    # 財報三率
+    ratio_info = all_ratios.get(raw_code, {})
+    gross_margin = ratio_info.get('gross_margin', 0.0)
+    operating_margin = ratio_info.get('operating_margin', 0.0)
+    pre_tax_margin = ratio_info.get('pre_tax_margin', 0.0)
+    net_margin = ratio_info.get('net_margin', 0.0)
+    ratio_quarter = f"{ratio_info.get('year', '')}Q{ratio_info.get('quarter', '')}" if ratio_info.get('year') else ""
+
+    # EPS 數據
+    eps_info = all_eps.get(raw_code, {})
+    eps = eps_info.get('eps', 0.0)
+    op_income = eps_info.get('operating_income', 0.0)
+    net_income = eps_info.get('net_income', 0.0)
+    eps_quarter = f"{eps_info.get('year', '')}Q{eps_info.get('quarter', '')}" if eps_info.get('year') else ""
+
+    # 官方評價與殖利率
+    val_info = all_valuations.get(raw_code, {})
+    div_yield = val_info.get('dividend_yield')
+    pe_ratio = val_info.get('pe_ratio')
+    pb_ratio = val_info.get('pb_ratio')
+    div_per_share = val_info.get('dividend_per_share')
+
+    # 補強 1：TPEx 上櫃股三率在 eps_info 中已先預算
+    if gross_margin == 0.0 and eps_info.get('gross_margin', 0.0) > 0:
+        gross_margin = eps_info.get('gross_margin', 0.0)
+    if operating_margin == 0.0 and eps_info.get('operating_margin', 0.0) != 0:
+        operating_margin = eps_info.get('operating_margin', 0.0)
+    if net_margin == 0.0 and eps_info.get('net_margin', 0.0) != 0:
+        net_margin = eps_info.get('net_margin', 0.0)
+
+    # 補強 2：若三率/EPS 為 0 或為非台股/KY股，調用 yfinance
+    final_quarter = ratio_quarter or eps_quarter
+    price = current_price
+    if gross_margin == 0.0 or eps == 0.0 or not final_quarter or div_yield is None or pe_ratio is None or price <= 0.0:
+        try:
+            q_hist = fetch_stock_quarterly_history(t)
+            if q_hist and q_hist.get("quarters") and len(q_hist["quarters"]) > 0:
+                latest_q = q_hist["quarters"][-1]
+                if not final_quarter:
+                    final_quarter = latest_q
+                if gross_margin == 0.0 and q_hist.get("gross_margin") and len(q_hist["gross_margin"]) > 0:
+                    gross_margin = q_hist["gross_margin"][-1]
+                if operating_margin == 0.0 and q_hist.get("operating_margin") and len(q_hist["operating_margin"]) > 0:
+                    operating_margin = q_hist["operating_margin"][-1]
+                if net_margin == 0.0 and q_hist.get("net_margin") and len(q_hist["net_margin"]) > 0:
+                    net_margin = q_hist["net_margin"][-1]
+                if eps == 0.0 and q_hist.get("eps") and len(q_hist["eps"]) > 0:
+                    eps = q_hist["eps"][-1]
+            if div_yield is None and q_hist.get('dividend_yield') is not None:
+                div_yield = q_hist['dividend_yield']
+            if pe_ratio is None and q_hist.get('pe_ratio') is not None:
+                pe_ratio = q_hist['pe_ratio']
+            if pb_ratio is None and q_hist.get('pb_ratio') is not None:
+                pb_ratio = q_hist['pb_ratio']
+        except Exception:
+            pass
+
+    # 若市價仍為 0，嘗試透過 yfinance 獲取最新市價
+    if price <= 0.0:
+        try:
+            ticker_obj = yf.Ticker(t)
+            fast_info = getattr(ticker_obj, 'fast_info', None)
+            if fast_info and getattr(fast_info, 'last_price', None):
+                price = float(fast_info.last_price)
+            else:
+                p_hist = ticker_obj.history(period="5d")
+                if not p_hist.empty:
+                    price = float(p_hist['Close'].iloc[-1])
+        except Exception:
+            price = 0.0
+
+    # 格式化季度顯示
+    if final_quarter.startswith("20") and len(final_quarter) >= 6:
+        try:
+            y_val = int(final_quarter[:4]) - 1911
+            final_quarter = f"{y_val}{final_quarter[4:]}"
+        except Exception:
+            pass
+
+    # 標籤判定
+    tags = []
+    if mom > 0 and yoy > 0:
+        tags.append("📈 營收雙增")
+    if yoy >= 20.0:
+        tags.append("🔥 年增>20%")
+    elif yoy >= 10.0:
+        tags.append("⚡ 年增>10%")
+    elif yoy < -10.0:
+        tags.append("⚠️ 年減>10%")
+    
+    if gross_margin >= 30.0:
+        tags.append("💎 高毛利")
+    if gross_margin > 0 and operating_margin > 0 and net_margin > 0:
+        if operating_margin > 15.0:
+            tags.append("🌟 獲利績優")
+
+    if div_yield is not None and div_yield >= 4.0:
+        tags.append("💰 高殖利率")
+
+    if yoy < 0 and gross_margin >= 25.0:
+        tags.append("🔄 營收降毛利高")
+    elif yoy > 0 and gross_margin < 20.0:
+        tags.append("⚡ 營收增毛利低")
+
+    return {
+        "Ticker": t,
+        "Code": raw_code,
+        "股票名稱": name,
+        "最新市價": price,
+        "持股市值": market_val,
+        "投組權重(%)": weight,
+        "帳面報酬(%)": roi,
+        "營收月份": month_display,
+        "當月營收(千元)": rev_cur,
+        "營收月增(MoM%)": mom,
+        "營收年增(YoY%)": yoy,
+        "累計營收(千元)": cum_rev,
+        "累計年增(%)": cum_yoy,
+        "財報季度": final_quarter or "最新",
+        "毛利率(%)": gross_margin,
+        "營業利益率(%)": operating_margin,
+        "稅前純益率(%)": pre_tax_margin,
+        "稅後淨利率(%)": net_margin,
+        "最新單季EPS(元)": eps,
+        "稅後淨利(千元)": net_income / 1000.0 if net_income else 0.0,
+        "殖利率(%)": div_yield if div_yield is not None else 0.0,
+        "每股股利(元)": div_per_share,
+        "本益比(PE)": pe_ratio,
+        "股價淨值比(PB)": pb_ratio,
+        "營收備註": note,
+        "標籤": " ".join(tags) if tags else "穩健"
+    }
+
+# ============================================================
 # Core Functions & Default Loans CSV
 # ============================================================
 
@@ -2785,41 +2991,39 @@ if hist_close is not None and not hist_close.empty:
         st.markdown("### 📈 持股基本面與營收追蹤看板")
         
         # 取得活躍持股（排除 REALIZED_CASH）
-        active_holdings = active_stock_df[active_stock_df['Ticker'] != 'REALIZED_CASH'].copy()
+        active_holdings = active_stock_df[active_stock_df['Ticker'] != 'REALIZED_CASH'].copy() if not active_stock_df.empty else pd.DataFrame()
         
-        if active_holdings.empty:
-            st.warning("⚠️ 目前投資組合無持股，無法進行基本面分析。")
-        else:
-            # 頂部說明框與手動刷新按鈕
-            top_col1, top_col2 = st.columns([5, 1])
-            with top_col1:
-                st.markdown("""
-                    <div style="background: rgba(128, 128, 128, 0.06); border: 1px solid rgba(128, 128, 128, 0.12); border-radius: 8px; padding: 12px 16px; margin-bottom: 15px; line-height: 1.6;">
-                        <span style="font-size: 14.5px; color: var(--text-color); opacity: 0.9; font-weight: 500; display: block; margin-bottom: 4px;">
-                            📊 <b>官方權威數據整合</b>：直接對接台灣證券交易所 (TWSE) 與櫃買中心 (TPEx) 官方 OpenAPI，毫秒級同步持股之最新每月營收、MoM(%)、YoY(%)、累計營收、財報三率（毛利率/營益率/淨利率）與單季 EPS。
-                        </span>
-                        <span style="font-size: 12.5px; color: var(--text-color); opacity: 0.7;">
-                            🎯 <b>追蹤重點</b>：營收月增年增成長動能、三率三升強勢獲利體質、單季與近四季獲利結構、本益比與評價位階。
-                        </span>
-                    </div>
-                """, unsafe_allow_html=True)
-            with top_col2:
-                if st.button("🔄 刷新數據", help="清除快取並重新自證交所與櫃買中心拉取最新基本面資料"):
-                    fetch_twse_tpex_monthly_revenue.clear()
-                    fetch_twse_tpex_financial_ratios.clear()
-                    fetch_twse_tpex_eps_data.clear()
-                    fetch_twse_tpex_valuation_ratios.clear()
-                    st.rerun()
+        # 頂部說明框與手動刷新按鈕
+        top_col1, top_col2 = st.columns([5, 1])
+        with top_col1:
+            st.markdown("""
+                <div style="background: rgba(128, 128, 128, 0.06); border: 1px solid rgba(128, 128, 128, 0.12); border-radius: 8px; padding: 12px 16px; margin-bottom: 15px; line-height: 1.6;">
+                    <span style="font-size: 14.5px; color: var(--text-color); opacity: 0.9; font-weight: 500; display: block; margin-bottom: 4px;">
+                        📊 <b>官方權威數據整合</b>：直接對接台灣證券交易所 (TWSE) 與櫃買中心 (TPEx) 官方 OpenAPI，毫秒級同步持股之最新每月營收、MoM(%)、YoY(%)、累計營收、財報三率（毛利率/營益率/淨利率）與單季 EPS。
+                    </span>
+                    <span style="font-size: 12.5px; color: var(--text-color); opacity: 0.7;">
+                        🎯 <b>追蹤重點</b>：營收月增年增成長動能、三率三升強勢獲利體質、單季與近四季獲利結構、本益比與評價位階。支援全市場台股與美股即時深度檢索。
+                    </span>
+                </div>
+            """, unsafe_allow_html=True)
+        with top_col2:
+            if st.button("🔄 刷新數據", help="清除快取並重新自證交所與櫃買中心拉取最新基本面資料"):
+                fetch_twse_tpex_monthly_revenue.clear()
+                fetch_twse_tpex_financial_ratios.clear()
+                fetch_twse_tpex_eps_data.clear()
+                fetch_twse_tpex_valuation_ratios.clear()
+                st.rerun()
 
-            # 載入全市場 OpenAPI 數據 (已由 @st.cache_data 快取)
-            with st.spinner("⚡ 正在同步證交所與櫃買中心最新基本面與營收數據..."):
-                all_monthly_rev = fetch_twse_tpex_monthly_revenue()
-                all_ratios = fetch_twse_tpex_financial_ratios()
-                all_eps = fetch_twse_tpex_eps_data()
-                all_valuations = fetch_twse_tpex_valuation_ratios()
+        # 載入全市場 OpenAPI 數據 (已由 @st.cache_data 快取)
+        with st.spinner("⚡ 正在同步證交所與櫃買中心最新基本面與營收數據..."):
+            all_monthly_rev = fetch_twse_tpex_monthly_revenue()
+            all_ratios = fetch_twse_tpex_financial_ratios()
+            all_eps = fetch_twse_tpex_eps_data()
+            all_valuations = fetch_twse_tpex_valuation_ratios()
 
-            # 整理持股基本面資料框
-            fundamental_rows = []
+        # 整理持股基本面資料框
+        fundamental_rows = []
+        if not active_holdings.empty:
             for _, row in active_holdings.iterrows():
                 t = row['Ticker'].strip().upper()
                 raw_code = t.split('.')[0]
@@ -2828,143 +3032,15 @@ if hist_close is not None and not hist_close.empty:
                 mkt_val = row.get('Market_Value', 0.0)
                 weight = row.get('Weight(%)', 0.0)
                 roi = row.get('Unrealized_ROI(%)', 0.0)
+                fund_row = get_single_stock_fundamental_data(
+                    t, all_monthly_rev, all_ratios, all_eps, all_valuations,
+                    stock_name=name, current_price=price, market_val=mkt_val, weight=weight, roi=roi
+                )
+                fundamental_rows.append(fund_row)
 
-                # 營收數據
-                rev_info = all_monthly_rev.get(raw_code, {})
-                rev_cur = rev_info.get('rev_current', 0.0) # 千元
-                rev_last_m = rev_info.get('rev_last_month', 0.0)
-                rev_last_y = rev_info.get('rev_last_year', 0.0)
-                mom = rev_info.get('mom', 0.0)
-                yoy = rev_info.get('yoy', 0.0)
-                cum_rev = rev_info.get('cum_rev', 0.0)
-                cum_yoy = rev_info.get('cum_yoy', 0.0)
-                data_month = rev_info.get('data_month', '')
-                note = rev_info.get('note', '')
+        fund_df = pd.DataFrame(fundamental_rows)
 
-                # 格式化資料年月 (例如 "11508" -> "115/08")
-                month_display = f"{data_month[:3]}/{data_month[3:]}" if len(data_month) == 5 else data_month
-
-                # 財報三率
-                ratio_info = all_ratios.get(raw_code, {})
-                gross_margin = ratio_info.get('gross_margin', 0.0)
-                operating_margin = ratio_info.get('operating_margin', 0.0)
-                pre_tax_margin = ratio_info.get('pre_tax_margin', 0.0)
-                net_margin = ratio_info.get('net_margin', 0.0)
-                ratio_quarter = f"{ratio_info.get('year', '')}Q{ratio_info.get('quarter', '')}" if ratio_info.get('year') else ""
-
-                # EPS 數據
-                eps_info = all_eps.get(raw_code, {})
-                eps = eps_info.get('eps', 0.0)
-                op_income = eps_info.get('operating_income', 0.0)
-                net_income = eps_info.get('net_income', 0.0)
-                eps_quarter = f"{eps_info.get('year', '')}Q{eps_info.get('quarter', '')}" if eps_info.get('year') else ""
-
-                # 官方權威評價與殖利率數據 (TWSE BWIBBU_ALL / TPEx tpex_mainboard_peratio_analysis)
-                val_info = all_valuations.get(raw_code, {})
-                div_yield = val_info.get('dividend_yield')
-                pe_ratio = val_info.get('pe_ratio')
-                pb_ratio = val_info.get('pb_ratio')
-                div_per_share = val_info.get('dividend_per_share')
-
-                # 補強 1：若三率中毛利率或營業利益率為 0，但 eps_info 中有計算值 (針對 TPEx 上櫃股)
-                if gross_margin == 0.0 and eps_info.get('gross_margin', 0.0) > 0:
-                    gross_margin = eps_info.get('gross_margin', 0.0)
-                if operating_margin == 0.0 and eps_info.get('operating_margin', 0.0) != 0:
-                    operating_margin = eps_info.get('operating_margin', 0.0)
-                if net_margin == 0.0 and eps_info.get('net_margin', 0.0) != 0:
-                    net_margin = eps_info.get('net_margin', 0.0)
-
-                # 補強 2：若仍缺少季度或三率/EPS 為 0 (如特定 KY 股或尚未由 OpenAPI 同步者)，自動調用 yfinance 季度財報補齊
-                final_quarter = ratio_quarter or eps_quarter
-                if gross_margin == 0.0 or eps == 0.0 or not final_quarter or div_yield is None or pe_ratio is None:
-                    try:
-                        q_hist = fetch_stock_quarterly_history(t)
-                        if q_hist and q_hist.get("quarters") and len(q_hist["quarters"]) > 0:
-                            latest_q = q_hist["quarters"][-1]
-                            if not final_quarter:
-                                final_quarter = latest_q
-                            if gross_margin == 0.0 and q_hist.get("gross_margin") and len(q_hist["gross_margin"]) > 0:
-                                gross_margin = q_hist["gross_margin"][-1]
-                            if operating_margin == 0.0 and q_hist.get("operating_margin") and len(q_hist["operating_margin"]) > 0:
-                                operating_margin = q_hist["operating_margin"][-1]
-                            if net_margin == 0.0 and q_hist.get("net_margin") and len(q_hist["net_margin"]) > 0:
-                                net_margin = q_hist["net_margin"][-1]
-                            if eps == 0.0 and q_hist.get("eps") and len(q_hist["eps"]) > 0:
-                                eps = q_hist["eps"][-1]
-                        if div_yield is None and q_hist.get('dividend_yield') is not None:
-                            div_yield = q_hist['dividend_yield']
-                        if pe_ratio is None and q_hist.get('pe_ratio') is not None:
-                            pe_ratio = q_hist['pe_ratio']
-                        if pb_ratio is None and q_hist.get('pb_ratio') is not None:
-                            pb_ratio = q_hist['pb_ratio']
-                    except Exception:
-                        pass
-
-                # 格式化季度顯示 (若為西元如 2024Q2 則轉為民國 113Q2，統一視覺體驗)
-                if final_quarter.startswith("20") and len(final_quarter) >= 6:
-                    try:
-                        y_val = int(final_quarter[:4]) - 1911
-                        final_quarter = f"{y_val}{final_quarter[4:]}"
-                    except Exception:
-                        pass
-
-                # 標籤判定
-                tags = []
-                if mom > 0 and yoy > 0:
-                    tags.append("📈 營收雙增")
-                if yoy >= 20.0:
-                    tags.append("🔥 年增>20%")
-                elif yoy >= 10.0:
-                    tags.append("⚡ 年增>10%")
-                elif yoy < -10.0:
-                    tags.append("⚠️ 年減>10%")
-                
-                if gross_margin >= 30.0:
-                    tags.append("💎 高毛利")
-                if gross_margin > 0 and operating_margin > 0 and net_margin > 0:
-                    if operating_margin > 15.0:
-                        tags.append("🌟 獲利績優")
-
-                if div_yield is not None and div_yield >= 4.0:
-                    tags.append("💰 高殖利率")
-
-                # 營收 vs 毛利 剪刀差標籤 (體質優化 vs 薄利承壓)
-                if yoy < 0 and gross_margin >= 25.0:
-                    tags.append("🔄 營收降毛利高")
-                elif yoy > 0 and gross_margin < 20.0:
-                    tags.append("⚡ 營收增毛利低")
-
-                fundamental_rows.append({
-                    "Ticker": t,
-                    "Code": raw_code,
-                    "股票名稱": name,
-                    "最新市價": price,
-                    "持股市值": mkt_val,
-                    "投組權重(%)": weight,
-                    "帳面報酬(%)": roi,
-                    "營收月份": month_display,
-                    "當月營收(千元)": rev_cur,
-                    "營收月增(MoM%)": mom,
-                    "營收年增(YoY%)": yoy,
-                    "累計營收(千元)": cum_rev,
-                    "累計年增(%)": cum_yoy,
-                    "財報季度": final_quarter or "113Q2",
-                    "毛利率(%)": gross_margin,
-                    "營業利益率(%)": operating_margin,
-                    "稅前純益率(%)": pre_tax_margin,
-                    "稅後淨利率(%)": net_margin,
-                    "最新單季EPS(元)": eps,
-                    "稅後淨利(千元)": net_income / 1000.0 if net_income else 0.0,
-                    "殖利率(%)": div_yield if div_yield is not None else 0.0,
-                    "每股股利(元)": div_per_share,
-                    "本益比(PE)": pe_ratio,
-                    "股價淨值比(PB)": pb_ratio,
-                    "營收備註": note,
-                    "標籤": " ".join(tags) if tags else "穩健"
-                })
-
-            fund_df = pd.DataFrame(fundamental_rows)
-
+        if not fund_df.empty:
             # ------------------------------------------------------------
             # 區塊一：投資組合基本面戰情報告 (Top KPI Cards)
             # ------------------------------------------------------------
@@ -3094,101 +3170,211 @@ if hist_close is not None and not hist_close.empty:
             }).map(_color_positive_green_negative_red, subset=["營收月增(MoM%)", "營收年增(YoY%)", "累計年增(%)", "營業利益率(%)", "稅後淨利率(%)", "最新單季EPS(元)"])
 
             st.dataframe(styled_table, use_container_width=True, height=min(450, 40 + len(table_to_format) * 35))
+        else:
+            st.info("💡 目前投資組合尚無庫存持股，故第一部分戰情指標與第二部分庫存總表暫無數據。您仍可使用下方【第三部分】自由檢索全市場台股與美股進行深度基本面分析！")
 
-            st.markdown("---")
+        st.markdown("---")
 
-            # ------------------------------------------------------------
-            # 區塊三：個股深度基本面透視鏡 (Deep Dive Stock Explorer)
-            # ------------------------------------------------------------
-            st.markdown("#### 🔍 【第三部分：個股深度基本面透視鏡與歷史趨勢】")
-            
+        # ------------------------------------------------------------
+        # 區塊三：個股深度基本面透視鏡 (Deep Dive Stock Explorer)
+        # ------------------------------------------------------------
+        st.markdown("#### 🔍 【第三部分：個股深度基本面透視鏡與歷史趨勢】")
+        
+        has_holdings = not fund_df.empty
+        source_options = ["📌 庫存持股", "🔍 全市場搜尋 / 自選股 (支援台股與美股)"] if has_holdings else ["🔍 全市場搜尋 / 自選股 (支援台股與美股)"]
+
+        search_mode = st.radio(
+            "🎯 選擇標的來源：",
+            source_options,
+            index=0,
+            horizontal=True,
+            key="deep_dive_source_mode"
+        )
+
+        selected_code = None
+        selected_ticker = None
+        selected_name = None
+        is_holding = False
+        selected_row = None
+
+        if search_mode == "📌 庫存持股":
             stock_options = [f"{r['股票名稱']} ({r['Code']})" for _, r in fund_df.iterrows()]
-            selected_stock_str = st.selectbox("🎯 請選擇欲深入剖析的持股標的：", stock_options, key="deep_dive_stock_select")
-            
+            selected_stock_str = st.selectbox("🎯 請選擇欲深入剖析的庫存標的：", stock_options, key="deep_dive_stock_select")
             if selected_stock_str:
                 selected_code = selected_stock_str.split('(')[-1].replace(')', '').strip()
+                matching_rows = fund_df[fund_df['Code'] == selected_code]
+                if not matching_rows.empty:
+                    selected_row = matching_rows.iloc[0]
+                    selected_ticker = selected_row['Ticker']
+                    selected_name = selected_row['股票名稱']
+                    is_holding = True
+        else:
+            # 全市場搜尋 / 自選股模式
+            all_market_dict = {}
+            for c, item in all_monthly_rev.items():
+                if c and item.get("name"):
+                    all_market_dict[c] = item["name"]
+            for c, item in all_valuations.items():
+                if c and item.get("name") and c not in all_market_dict:
+                    all_market_dict[c] = item["name"]
+            for k, v in STOCK_NAMES.items():
+                raw_c = k.split('.')[0]
+                if raw_c not in all_market_dict and raw_c.isdigit():
+                    all_market_dict[raw_c] = v
+
+            sorted_codes = sorted(all_market_dict.keys(), key=lambda x: (len(x), x))
+            all_market_options = [f"{all_market_dict[c]} ({c})" for c in sorted_codes]
+
+            search_col1, search_col2 = st.columns([3, 2])
+            with search_col1:
+                # 預設選中台積電 (2330) 或第一檔
+                default_idx = 0
+                for idx, opt in enumerate(all_market_options):
+                    if "2330" in opt:
+                        default_idx = idx
+                        break
+                if all_market_options:
+                    chosen_from_list = st.selectbox(
+                        "🏢 從全台股清單中搜尋（輸入代號或名稱可即時模糊過濾）：",
+                        all_market_options,
+                        index=default_idx,
+                        key="market_stock_selectbox"
+                    )
+                else:
+                    chosen_from_list = "台積電 (2330)"
+            with search_col2:
+                custom_ticker_input = st.text_input(
+                    "✍️ 或手動輸入任意股票代號（支援台美股如 2330, NVDA, AAPL）：",
+                    value="",
+                    placeholder="例: NVDA, AAPL, 2454",
+                    key="custom_stock_input"
+                ).strip().upper()
+
+            # 決定選定標的
+            if custom_ticker_input:
+                target_code = custom_ticker_input.split('.')[0].strip()
+                selected_code = target_code
+                selected_ticker = custom_ticker_input
+            elif chosen_from_list:
+                target_code = chosen_from_list.split('(')[-1].replace(')', '').strip()
+                selected_code = target_code
+                selected_ticker = target_code
+            else:
+                selected_code = "2330"
+                selected_ticker = "2330.TW"
+
+            # 檢查是否正好在目前庫存中
+            if has_holdings and not fund_df[fund_df['Code'] == selected_code].empty:
                 selected_row = fund_df[fund_df['Code'] == selected_code].iloc[0]
                 selected_ticker = selected_row['Ticker']
                 selected_name = selected_row['股票名稱']
-
-                # 深度抓取歷史季度數據與評價資訊 (yfinance) 及長週期月營收 (FinMind + MOPS)
-                with st.spinner(f"⏳ 正在獲取 {selected_name} ({selected_code}) 歷史財報與 24~36 個月營收數據..."):
-                    q_hist = fetch_stock_quarterly_history(selected_ticker)
-                    mops_monthly = fetch_stock_monthly_revenue_history(selected_code)
-
-                # 個股 4 大指標卡片
-                d_col1, d_col2, d_col3, d_col4 = st.columns(4)
-                with d_col1:
-                    render_metric_card(
-                        "💰 最新單月營收與動能",
-                        f"{selected_row['當月營收(千元)'] / 1000.0:,.1f} 百萬元",
-                        f"月增: {selected_row['營收月增(MoM%)']:+.2f}% | 年增: {selected_row['營收年增(YoY%)']:+.2f}%",
-                        value_color="#10b981" if selected_row['營收年增(YoY%)'] >= 0 else "#ef4444"
+                is_holding = True
+            else:
+                is_holding = False
+                with st.spinner(f"⚡ 正在自官方 OpenAPI 與財務庫載入 {selected_code} 基本面數據..."):
+                    selected_row = get_single_stock_fundamental_data(
+                        selected_ticker, all_monthly_rev, all_ratios, all_eps, all_valuations
                     )
-                with d_col2:
-                    render_metric_card(
-                        f"📊 財報三率 ({selected_row['財報季度'] or '最新'})",
-                        f"毛利 {selected_row['毛利率(%)']:.1f}%",
-                        f"營益率: {selected_row['營業利益率(%)']:.1f}% | 淨利率: {selected_row['稅後淨利率(%)']:.1f}%",
-                        value_color="#3b82f6"
-                    )
-                with d_col3:
-                    pe_val = selected_row.get('本益比(PE)')
-                    pb_val = selected_row.get('股價淨值比(PB)')
-                    pe_str = f"{pe_val:.1f} 倍" if pd.notna(pe_val) and pe_val > 0 else (f"{q_hist['pe_ratio']:.1f} 倍" if q_hist.get('pe_ratio') else "N/A")
-                    pb_str = f"{pb_val:.2f} 倍" if pd.notna(pb_val) and pb_val > 0 else (f"{q_hist['pb_ratio']:.2f} 倍" if q_hist.get('pb_ratio') else "N/A")
-                    render_metric_card(
-                        "⚖️ 評價指標 (PE / PB)",
-                        f"PE: {pe_str}",
-                        f"股價淨值比 PB: {pb_str}",
-                        value_color="#8b5cf6"
-                    )
-                with d_col4:
-                    dy_val = selected_row.get('殖利率(%)')
-                    if pd.notna(dy_val) and dy_val > 0:
-                        dy_str = f"{dy_val:.2f}%"
-                    elif pd.notna(dy_val) and dy_val == 0.0:
-                        dy_str = "0.00% (未配息)"
-                    elif q_hist.get('dividend_yield') is not None and q_hist['dividend_yield'] > 0:
-                        dy_str = f"{q_hist['dividend_yield']:.2f}%"
-                    else:
-                        dy_str = "0.00% (未配息)"
-                    dps_val = selected_row.get('每股股利(元)')
-                    dps_str = f" | 每股配息 {dps_val:.2f}元" if pd.notna(dps_val) and dps_val > 0 else ""
-                    roe_str = f"{q_hist['roe']:.1f}%" if q_hist.get('roe') is not None else "N/A"
-                    render_metric_card(
-                        "🌱 股利殖利率與 ROE",
-                        f"殖利率: {dy_str}",
-                        f"ROE: {roe_str}{dps_str} | EPS: {selected_row['最新單季EPS(元)']:+.2f}元",
-                        value_color="#10b981" if (pd.notna(dy_val) and dy_val >= 4.0) else "#f59e0b"
-                    )
+                    selected_ticker = selected_row['Ticker']
+                    selected_name = selected_row['股票名稱']
 
-                # 圖表展示：雙欄佈局
-                chart_tab1, chart_tab2, chart_tab3 = st.tabs([
-                    "📊 每月營收雙軸走勢圖 (多月份長週期)",
-                    "📈 跨季財報三率趨勢圖",
-                    "💵 單季 EPS 與獲利走勢圖"
-                ])
+        if selected_row is not None:
+            # 觀察標的提示橫幅
+            if not is_holding:
+                st.info(f"💡 **【全市場觀察標的（非庫存持股）】** 目前正在深度檢視 **{selected_name} ({selected_code})**。各項營收、財報三率、EPS 與估值數據已自證交所/櫃買中心官方 OpenAPI 與財務資料庫同步載入，不影響您的投資組合統計。")
 
-                # ── 圖表 1：每月營收雙軸走勢圖 (多月份長週期) ──
-                with chart_tab1:
-                    if mops_monthly and len(mops_monthly) >= 2:
-                        rev_x = [m["date_label"] for m in mops_monthly]
-                        rev_y = [m["revenue"] / 1000.0 for m in mops_monthly] # 轉為百萬元
-                        mom_y = [m["mom"] for m in mops_monthly]
-                        yoy_y = [m["yoy"] for m in mops_monthly]
-                        chart_subtitle = f"共涵蓋近 {len(rev_x)} 個月之完整營收走勢"
-                    else:
-                        rev_x = ["去年同月", "上月", f"當月 ({selected_row['營收月份']})"]
-                        rev_y = [
-                            all_monthly_rev.get(selected_code, {}).get('rev_last_year', 0) / 1000.0,
-                            all_monthly_rev.get(selected_code, {}).get('rev_last_month', 0) / 1000.0,
-                            selected_row['當月營收(千元)'] / 1000.0
-                        ]
-                        mom_y = [0.0, 0.0, selected_row['營收月增(MoM%)']]
-                        yoy_y = [0.0, 0.0, selected_row['營收年增(YoY%)']]
-                        chart_subtitle = "展示近月與去年同期對比"
+            # 深度抓取歷史季度數據與評價資訊 (yfinance) 及長週期月營收 (FinMind + MOPS)
+            with st.spinner(f"⏳ 正在獲取 {selected_name} ({selected_code}) 歷史財報與 24~36 個月營收數據..."):
+                q_hist = fetch_stock_quarterly_history(selected_ticker)
+                mops_monthly = fetch_stock_monthly_revenue_history(selected_code)
 
+            # 個股 4 大指標卡片
+            d_col1, d_col2, d_col3, d_col4 = st.columns(4)
+            with d_col1:
+                cur_rev_val = selected_row.get('當月營收(千元)', 0.0)
+                if cur_rev_val > 0:
+                    card1_val = f"{cur_rev_val / 1000.0:,.1f} 百萬元"
+                    card1_sub = f"月增: {selected_row['營收月增(MoM%)']:+.2f}% | 年增: {selected_row['營收年增(YoY%)']:+.2f}%"
+                    card1_color = "#10b981" if selected_row['營收年增(YoY%)'] >= 0 else "#ef4444"
+                else:
+                    card1_val = f"季度營收 {q_hist['revenue'][-1] / 1e6:,.1f}M" if q_hist.get('revenue') and len(q_hist['revenue']) > 0 else "無月營收申報"
+                    card1_sub = f"財報季度: {selected_row['財報季度']}"
+                    card1_color = "#3b82f6"
+                render_metric_card(
+                    "💰 最新單月/季度營收動能",
+                    card1_val,
+                    card1_sub,
+                    value_color=card1_color
+                )
+            with d_col2:
+                render_metric_card(
+                    f"📊 財報三率 ({selected_row['財報季度'] or '最新'})",
+                    f"毛利 {selected_row['毛利率(%)']:.1f}%",
+                    f"營益率: {selected_row['營業利益率(%)']:.1f}% | 淨利率: {selected_row['稅後淨利率(%)']:.1f}%",
+                    value_color="#3b82f6"
+                )
+            with d_col3:
+                pe_val = selected_row.get('本益比(PE)')
+                pb_val = selected_row.get('股價淨值比(PB)')
+                pe_str = f"{pe_val:.1f} 倍" if pd.notna(pe_val) and pe_val > 0 else (f"{q_hist['pe_ratio']:.1f} 倍" if q_hist.get('pe_ratio') else "N/A")
+                pb_str = f"{pb_val:.2f} 倍" if pd.notna(pb_val) and pb_val > 0 else (f"{q_hist['pb_ratio']:.2f} 倍" if q_hist.get('pb_ratio') else "N/A")
+                render_metric_card(
+                    "⚖️ 評價指標 (PE / PB)",
+                    f"PE: {pe_str}",
+                    f"股價淨值比 PB: {pb_str}",
+                    value_color="#8b5cf6"
+                )
+            with d_col4:
+                dy_val = selected_row.get('殖利率(%)')
+                if pd.notna(dy_val) and dy_val > 0:
+                    dy_str = f"{dy_val:.2f}%"
+                elif pd.notna(dy_val) and dy_val == 0.0:
+                    dy_str = "0.00% (未配息)"
+                elif q_hist.get('dividend_yield') is not None and q_hist['dividend_yield'] > 0:
+                    dy_str = f"{q_hist['dividend_yield']:.2f}%"
+                else:
+                    dy_str = "0.00% (未配息)"
+                dps_val = selected_row.get('每股股利(元)')
+                dps_str = f" | 每股配息 {dps_val:.2f}元" if pd.notna(dps_val) and dps_val > 0 else ""
+                roe_str = f"{q_hist['roe']:.1f}%" if q_hist.get('roe') is not None else "N/A"
+                render_metric_card(
+                    "🌱 股利殖利率與 ROE",
+                    f"殖利率: {dy_str}",
+                    f"ROE: {roe_str}{dps_str} | EPS: {selected_row['最新單季EPS(元)']:+.2f}元",
+                    value_color="#10b981" if (pd.notna(dy_val) and dy_val >= 4.0) else "#f59e0b"
+                )
+
+            # 圖表展示：雙欄佈局
+            chart_tab1, chart_tab2, chart_tab3 = st.tabs([
+                "📊 每月營收雙軸走勢圖 (多月份長週期)",
+                "📈 跨季財報三率趨勢圖",
+                "💵 單季 EPS 與獲利走勢圖"
+            ])
+
+            # ── 圖表 1：每月營收雙軸走勢圖 (多月份長週期) ──
+            with chart_tab1:
+                if mops_monthly and len(mops_monthly) >= 2:
+                    rev_x = [m["date_label"] for m in mops_monthly]
+                    rev_y = [m["revenue"] / 1000.0 for m in mops_monthly] # 轉為百萬元
+                    mom_y = [m["mom"] for m in mops_monthly]
+                    yoy_y = [m["yoy"] for m in mops_monthly]
+                    chart_subtitle = f"共涵蓋近 {len(rev_x)} 個月之完整營收走勢"
+                    has_chart_data = True
+                elif selected_row.get('當月營收(千元)', 0.0) > 0:
+                    rev_x = ["去年同月", "上月", f"當月 ({selected_row['營收月份']})"]
+                    rev_y = [
+                        all_monthly_rev.get(selected_code, {}).get('rev_last_year', 0) / 1000.0,
+                        all_monthly_rev.get(selected_code, {}).get('rev_last_month', 0) / 1000.0,
+                        selected_row['當月營收(千元)'] / 1000.0
+                    ]
+                    mom_y = [0.0, 0.0, selected_row['營收月增(MoM%)']]
+                    yoy_y = [0.0, 0.0, selected_row['營收年增(YoY%)']]
+                    chart_subtitle = "展示近月與去年同期對比"
+                    has_chart_data = True
+                else:
+                    has_chart_data = False
+
+                if has_chart_data:
                     fig_rev = go.Figure()
                     # 柱狀圖：營收金額
                     fig_rev.add_trace(go.Bar(
@@ -3228,114 +3414,116 @@ if hist_close is not None and not hist_close.empty:
                         margin=dict(l=40, r=40, t=60, b=40)
                     )
                     st.plotly_chart(fig_rev, use_container_width=True)
+                else:
+                    st.info(f"💡 **{selected_name} ({selected_code})** 為美股或無公開月營收申報之標的（依規定採季度申報）。請點選上方【📈 跨季財報三率趨勢圖】或【💵 單季 EPS 與獲利走勢圖】查閱跨季度營收與獲利趨勢！")
 
-                # ── 圖表 2：財報三率趨勢圖 ──
-                with chart_tab2:
-                    if q_hist["quarters"] and len(q_hist["quarters"]) >= 2:
-                        fig_ratios = go.Figure()
-                        fig_ratios.add_trace(go.Scatter(
-                            x=q_hist["quarters"],
-                            y=q_hist["gross_margin"],
-                            name="毛利率 (%)",
-                            mode="lines+markers+text",
-                            text=[f"{v:.1f}%" for v in q_hist["gross_margin"]],
-                            textposition="top center",
-                            line=dict(color="#3b82f6", width=3),
-                            marker=dict(size=7)
-                        ))
-                        fig_ratios.add_trace(go.Scatter(
-                            x=q_hist["quarters"],
-                            y=q_hist["operating_margin"],
-                            name="營業利益率 (%)",
-                            mode="lines+markers+text",
-                            text=[f"{v:.1f}%" for v in q_hist["operating_margin"]],
-                            textposition="bottom center",
-                            line=dict(color="#10b981", width=2.5),
-                            marker=dict(size=6)
-                        ))
-                        fig_ratios.add_trace(go.Scatter(
-                            x=q_hist["quarters"],
-                            y=q_hist["net_margin"],
-                            name="稅後淨利率 (%)",
-                            mode="lines+markers",
-                            line=dict(color="#ec4899", width=2, dash="dash"),
-                            marker=dict(size=5)
-                        ))
-                        fig_ratios.update_layout(
-                            title=f"📊 {selected_name} ({selected_code}) 跨季度財報三率走勢 (毛利率 / 營業利益率 / 稅後淨利率)",
-                            xaxis=dict(title="季度"),
-                            yaxis=dict(title="百分比 (%)", zeroline=True),
-                            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                            height=420,
-                            margin=dict(l=40, r=40, t=60, b=40)
-                        )
-                        st.plotly_chart(fig_ratios, use_container_width=True)
-                    else:
-                        st.info(f"💡 {selected_name} 目前官方申報最新季度 ({selected_row['財報季度'] or '最新'})：毛利率 **{selected_row['毛利率(%)']:.2f}%** | 營業利益率 **{selected_row['營業利益率(%)']:.2f}%** | 稅後淨利率 **{selected_row['稅後淨利率(%)']:.2f}%**。")
+            # ── 圖表 2：財報三率趨勢圖 ──
+            with chart_tab2:
+                if q_hist["quarters"] and len(q_hist["quarters"]) >= 2:
+                    fig_ratios = go.Figure()
+                    fig_ratios.add_trace(go.Scatter(
+                        x=q_hist["quarters"],
+                        y=q_hist["gross_margin"],
+                        name="毛利率 (%)",
+                        mode="lines+markers+text",
+                        text=[f"{v:.1f}%" for v in q_hist["gross_margin"]],
+                        textposition="top center",
+                        line=dict(color="#3b82f6", width=3),
+                        marker=dict(size=7)
+                    ))
+                    fig_ratios.add_trace(go.Scatter(
+                        x=q_hist["quarters"],
+                        y=q_hist["operating_margin"],
+                        name="營業利益率 (%)",
+                        mode="lines+markers+text",
+                        text=[f"{v:.1f}%" for v in q_hist["operating_margin"]],
+                        textposition="bottom center",
+                        line=dict(color="#10b981", width=2.5),
+                        marker=dict(size=6)
+                    ))
+                    fig_ratios.add_trace(go.Scatter(
+                        x=q_hist["quarters"],
+                        y=q_hist["net_margin"],
+                        name="稅後淨利率 (%)",
+                        mode="lines+markers",
+                        line=dict(color="#ec4899", width=2, dash="dash"),
+                        marker=dict(size=5)
+                    ))
+                    fig_ratios.update_layout(
+                        title=f"📊 {selected_name} ({selected_code}) 跨季度財報三率走勢 (毛利率 / 營業利益率 / 稅後淨利率)",
+                        xaxis=dict(title="季度"),
+                        yaxis=dict(title="百分比 (%)", zeroline=True),
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                        height=420,
+                        margin=dict(l=40, r=40, t=60, b=40)
+                    )
+                    st.plotly_chart(fig_ratios, use_container_width=True)
+                else:
+                    st.info(f"💡 {selected_name} 目前官方申報最新季度 ({selected_row['財報季度'] or '最新'})：毛利率 **{selected_row['毛利率(%)']:.2f}%** | 營業利益率 **{selected_row['營業利益率(%)']:.2f}%** | 稅後淨利率 **{selected_row['稅後淨利率(%)']:.2f}%**。")
 
-                # ── 圖表 3：單季 EPS 與獲利結構圖 ──
-                with chart_tab3:
-                    if q_hist["quarters"] and len(q_hist["quarters"]) >= 2:
-                        fig_eps = go.Figure()
-                        fig_eps.add_trace(go.Bar(
-                            x=q_hist["quarters"],
-                            y=q_hist["eps"],
-                            name="單季 EPS (元)",
-                            marker_color=["#10b981" if v >= 0 else "#ef4444" for v in q_hist["eps"]],
-                            text=[f"{v:.2f}" for v in q_hist["eps"]],
-                            textposition="outside",
-                            yaxis="y1"
-                        ))
-                        # 稅後淨利折線
-                        fig_eps.add_trace(go.Scatter(
-                            x=q_hist["quarters"],
-                            y=[v / 1e6 for v in q_hist["net_income"]], # 百萬元
-                            name="稅後淨利 (百萬元)",
-                            mode="lines+markers",
-                            line=dict(color="#f59e0b", width=2.5),
-                            marker=dict(size=6),
-                            yaxis="y2"
-                        ))
-                        fig_eps.update_layout(
-                            title=f"💵 {selected_name} ({selected_code}) 季度 EPS 與獲利走勢",
-                            xaxis=dict(title="季度"),
-                            yaxis=dict(title="每股盈餘 (元)", side="left"),
-                            yaxis2=dict(title="稅後淨利 (百萬元)", side="right", overlaying="y", showgrid=False),
-                            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                            height=420,
-                            margin=dict(l=40, r=40, t=60, b=40)
-                        )
-                        st.plotly_chart(fig_eps, use_container_width=True)
-                    else:
-                        st.info(f"💡 {selected_name} 最新單季基本每股盈餘 (EPS)：**{selected_row['最新單季EPS(元)']:+.2f} 元**。")
+            # ── 圖表 3：單季 EPS 與獲利結構圖 ──
+            with chart_tab3:
+                if q_hist["quarters"] and len(q_hist["quarters"]) >= 2:
+                    fig_eps = go.Figure()
+                    fig_eps.add_trace(go.Bar(
+                        x=q_hist["quarters"],
+                        y=q_hist["eps"],
+                        name="單季 EPS (元)",
+                        marker_color=["#10b981" if v >= 0 else "#ef4444" for v in q_hist["eps"]],
+                        text=[f"{v:.2f}" for v in q_hist["eps"]],
+                        textposition="outside",
+                        yaxis="y1"
+                    ))
+                    # 稅後淨利折線
+                    fig_eps.add_trace(go.Scatter(
+                        x=q_hist["quarters"],
+                        y=[v / 1e6 for v in q_hist["net_income"]], # 百萬元
+                        name="稅後淨利 (百萬元)",
+                        mode="lines+markers",
+                        line=dict(color="#f59e0b", width=2.5),
+                        marker=dict(size=6),
+                        yaxis="y2"
+                    ))
+                    fig_eps.update_layout(
+                        title=f"💵 {selected_name} ({selected_code}) 季度 EPS 與獲利走勢",
+                        xaxis=dict(title="季度"),
+                        yaxis=dict(title="每股盈餘 (元)", side="left"),
+                        yaxis2=dict(title="稅後淨利 (百萬元)", side="right", overlaying="y", showgrid=False),
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                        height=420,
+                        margin=dict(l=40, r=40, t=60, b=40)
+                    )
+                    st.plotly_chart(fig_eps, use_container_width=True)
+                else:
+                    st.info(f"💡 {selected_name} 最新單季基本每股盈餘 (EPS)：**{selected_row['最新單季EPS(元)']:+.2f} 元**。")
 
-                # 個股體檢診斷筆記 (包含營收與毛利率剪刀差關係評析)
-                with st.expander(f"📝 【{selected_name} ({selected_code})】 基本面體檢與診斷筆記", expanded=True):
-                    diag_mom_text = "月增成長" if selected_row['營收月增(MoM%)'] > 0 else "月增衰退"
-                    diag_yoy_text = "年增成長" if selected_row['營收年增(YoY%)'] > 0 else "年增衰退"
-                    diag_margin_text = "毛利率高於 30%，具備強大產品競爭力/護城河" if selected_row['毛利率(%)'] >= 30.0 else ("毛利率介於 15%~30%，體質穩健" if selected_row['毛利率(%)'] >= 15.0 else "毛利率低於 15%，屬薄利或成熟競爭市場")
-                    
-                    # 剪刀差分析：營收 vs 毛利
-                    gm_change = 0.0
-                    if q_hist["quarters"] and len(q_hist["gross_margin"]) >= 2:
-                        gm_change = q_hist["gross_margin"][-1] - q_hist["gross_margin"][-2]
-                    
-                    yoy_val = selected_row['營收年增(YoY%)']
-                    gm_val = selected_row['毛利率(%)']
-                    
-                    if yoy_val > 0 and (gm_change > 0 or gm_val >= 25.0):
-                        scissor_diag = f"🚀 **【雙引擎擴張】** 營收年增達 **{yoy_val:+.2f}%** 且毛利率維持在 **{gm_val:.2f}%** 高檔（季變動 {gm_change:+.2f}%），顯示產品具備強大市場競爭力與定價話語權，獲利含金量與營收規模同步擴張。"
-                    elif yoy_val < 0 and (gm_change > 0 or gm_val >= 25.0):
-                        scissor_diag = f"🔄 **【營收下降但毛利上升 / 結構轉型優化】** 雖然單月營收年減 **{yoy_val:+.2f}%**，但毛利率達 **{gm_val:.2f}%**（季變動 {gm_change:+.2f}%），呈現「營收降、毛利升」之結構優化特徵。通常代表公司正在主動淘汰低毛利代工訂單、聚焦高附加價值利基型產品，或成本轉嫁效益顯現，體質正在轉佳！"
-                    elif yoy_val > 0 and (gm_change < 0 or gm_val < 20.0):
-                        scissor_diag = f"⚡ **【營收上升但毛利下降 / 薄利競爭或成本承壓】** 營收年增達 **{yoy_val:+.2f}%** 表現亮眼，但毛利率僅 **{gm_val:.2f}%**（季變動 {gm_change:+.2f}%），呈現「營收升、毛利降」之剪刀差。需特別留意是否受原物料成本上漲、產業進入殺價競爭，或擴大出貨低毛利產品導致「營收虛胖、獲利受壓」之風險。"
-                    else:
-                        scissor_diag = f"💀 **【量利齊跌 / 景氣下行警戒】** 營收年減 **{yoy_val:+.2f}%** 且毛利率處於 **{gm_val:.2f}%**（季變動 {gm_change:+.2f}%），面臨需求走弱與利潤率壓縮雙重挑戰，需留意產業景氣落底信號。"
+            # 個股體檢診斷筆記 (包含營收與毛利率剪刀差關係評析)
+            with st.expander(f"📝 【{selected_name} ({selected_code})】 基本面體檢與診斷筆記", expanded=True):
+                diag_mom_text = "月增成長" if selected_row['營收月增(MoM%)'] > 0 else "月增衰退"
+                diag_yoy_text = "年增成長" if selected_row['營收年增(YoY%)'] > 0 else "年增衰退"
+                diag_margin_text = "毛利率高於 30%，具備強大產品競爭力/護城河" if selected_row['毛利率(%)'] >= 30.0 else ("毛利率介於 15%~30%，體質穩健" if selected_row['毛利率(%)'] >= 15.0 else "毛利率低於 15%，屬薄利或成熟競爭市場")
+                
+                # 剪刀差分析：營收 vs 毛利
+                gm_change = 0.0
+                if q_hist["quarters"] and len(q_hist["gross_margin"]) >= 2:
+                    gm_change = q_hist["gross_margin"][-1] - q_hist["gross_margin"][-2]
+                
+                yoy_val = selected_row['營收年增(YoY%)']
+                gm_val = selected_row['毛利率(%)']
+                
+                if yoy_val > 0 and (gm_change > 0 or gm_val >= 25.0):
+                    scissor_diag = f"🚀 **【雙引擎擴張】** 營收年增達 **{yoy_val:+.2f}%** 且毛利率維持在 **{gm_val:.2f}%** 高檔（季變動 {gm_change:+.2f}%），顯示產品具備強大市場競爭力與定價話語權，獲利含金量與營收規模同步擴張。"
+                elif yoy_val < 0 and (gm_change > 0 or gm_val >= 25.0):
+                    scissor_diag = f"🔄 **【營收下降但毛利上升 / 結構轉型優化】** 雖然單月營收年減 **{yoy_val:+.2f}%**，但毛利率達 **{gm_val:.2f}%**（季變動 {gm_change:+.2f}%），呈現「營收降、毛利升」之結構優化特徵。通常代表公司正在主動淘汰低毛利代工訂單、聚焦高附加價值利基型產品，或成本轉嫁效益顯現，體質正在轉佳！"
+                elif yoy_val > 0 and (gm_change < 0 or gm_val < 20.0):
+                    scissor_diag = f"⚡ **【營收上升但毛利下降 / 薄利競爭或成本承壓】** 營收年增達 **{yoy_val:+.2f}%** 表現亮眼，但毛利率僅 **{gm_val:.2f}%**（季變動 {gm_change:+.2f}%），呈現「營收升、毛利降」之剪刀差。需特別留意是否受原物料成本上漲、產業進入殺價競爭，或擴大出貨低毛利產品導致「營收虛胖、獲利受壓」之風險。"
+                else:
+                    scissor_diag = f"💀 **【量利齊跌 / 景氣下行警戒】** 營收年減 **{yoy_val:+.2f}%** 且毛利率處於 **{gm_val:.2f}%**（季變動 {gm_change:+.2f}%），面臨需求走弱與利潤率壓縮雙重挑戰，需留意產業景氣落底信號。"
 
-                    st.markdown(f"""
-                    - **營收動能評等**：當月營收呈現 **{diag_mom_text} ({selected_row['營收月增(MoM%)']:+.2f}%)** 與 **{diag_yoy_text} ({selected_row['營收年增(YoY%)']:+.2f}%)**。累計年增率為 **{selected_row['累計年增(%)']:+.2f}%**。
-                    - **營收與毛利剪刀差診斷**：{scissor_diag}
-                    - **本業競爭力與產品毛利**：最新申報毛利率為 **{selected_row['毛利率(%)']:.2f}%**（{diag_margin_text}）。營業利益率為 **{selected_row['營業利益率(%)']:.2f}%**。
-                    - **淨利結構檢驗**：稅後淨利率 **{selected_row['稅後淨利率(%)']:.2f}%** 與營業利益率相較，{'業外損益貢獻正面' if selected_row['稅後淨利率(%)'] >= selected_row['營業利益率(%)'] else '業外支出略有侵蝕或所得稅提列'}。
-                    - **評價估值水位**：目前本益比約 **{pe_str}**，股價淨值比約 **{pb_str}**。
-                    """)
+                st.markdown(f"""
+                - **營收動能評等**：當月營收呈現 **{diag_mom_text} ({selected_row['營收月增(MoM%)']:+.2f}%)** 與 **{diag_yoy_text} ({selected_row['營收年增(YoY%)']:+.2f}%)**。累計年增率為 **{selected_row['累計年增(%)']:+.2f}%**。
+                - **營收與毛利剪刀差診斷**：{scissor_diag}
+                - **本業競爭力與產品毛利**：最新申報毛利率為 **{selected_row['毛利率(%)']:.2f}%**（{diag_margin_text}）。營業利益率為 **{selected_row['營業利益率(%)']:.2f}%**。
+                - **淨利結構檢驗**：稅後淨利率 **{selected_row['稅後淨利率(%)']:.2f}%** 與營業利益率相較，{'業外損益貢獻正面' if selected_row['稅後淨利率(%)'] >= selected_row['營業利益率(%)'] else '業外支出略有侵蝕或所得稅提列'}。
+                - **評價估值水位**：目前本益比約 **{pe_str}**，股價淨值比約 **{pb_str}**。
+                """)
