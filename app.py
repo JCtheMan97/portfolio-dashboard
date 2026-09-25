@@ -1057,6 +1057,18 @@ def fetch_stock_quarterly_history(ticker):
         "roa": None,
         "high_52w": None,
         "low_52w": None,
+        "roe_history": [],
+        "roa_history": [],
+        "leverage_history": [],
+        "bvps_history": [],
+        "ttm_eps_history": [],
+        "quarterly_prices": [],
+        "pe_multipliers": [],
+        "pe_river_bands": {},
+        "pb_multipliers": [],
+        "pb_river_bands": {},
+        "current_pe_zone": "",
+        "current_pb_zone": "",
     }
 
     # 1. 優先從 TWSE / TPEx 官方 OpenAPI 獲取最權威的 殖利率、PE 與 PB
@@ -1287,6 +1299,235 @@ def fetch_stock_quarterly_history(ticker):
             result["gross_margin"] = result["gross_margin"][-keep_n:]
             result["operating_margin"] = result["operating_margin"][-keep_n:]
             result["net_margin"] = result["net_margin"][-keep_n:]
+
+        # 3. 讀取資產負債表 (Balance Sheet) 與歷史月收盤價，推導歷季 ROE、ROA、槓桿倍數、BVPS 與 PE/PB 河流圖
+        try:
+            q_bs = None
+            try:
+                q_bs = t_obj.quarterly_balance_sheet
+                if q_bs is None or q_bs.empty:
+                    q_bs = t_obj.quarterly_balancesheet
+            except Exception:
+                pass
+
+            # 取得流通股數與每股淨值備援
+            shares_out = None
+            bvps_latest = None
+            try:
+                if info:
+                    shares_out = info.get("sharesOutstanding") or info.get("impliedSharesOutstanding")
+                    bvps_latest = info.get("bookValue")
+            except Exception:
+                pass
+            
+            cur_p = 0.0
+            try:
+                if info:
+                    cur_p = float(info.get("regularMarketPrice") or info.get("currentPrice") or 0.0)
+            except Exception:
+                pass
+
+            if (bvps_latest is None or bvps_latest <= 0) and result["pb_ratio"] and result["pb_ratio"] > 0 and cur_p > 0:
+                bvps_latest = round(cur_p / result["pb_ratio"], 2)
+
+            # 歷季歷史收盤價獲取 (過去 3 年月收盤價)
+            q_prices = {}
+            try:
+                p_hist = t_obj.history(period="3y", interval="1mo")
+                if not p_hist.empty:
+                    for idx_dt, p_row in p_hist.iterrows():
+                        dt = pd.to_datetime(idx_dt)
+                        q_key = f"{dt.year}Q{(dt.month - 1) // 3 + 1}"
+                        q_prices[q_key] = float(p_row['Close'])
+            except Exception:
+                pass
+
+            num_q = len(result["quarters"])
+            roe_list = []
+            roa_list = []
+            leverage_list = []
+            bvps_list = []
+            price_list = []
+
+            for i, q_name in enumerate(result["quarters"]):
+                # 股價配對 (最新一季優先使用即時現價)
+                if i == num_q - 1 and cur_p > 0:
+                    p_val = cur_p
+                elif q_name in q_prices:
+                    p_val = q_prices[q_name]
+                else:
+                    p_val = cur_p if cur_p > 0 else 0.0
+                price_list.append(round(p_val, 2))
+
+                # 資產負債表科目比對
+                eq_val = None
+                ast_val = None
+                if q_bs is not None and not q_bs.empty:
+                    for bsc in q_bs.columns:
+                        bs_dt = pd.to_datetime(bsc)
+                        bsc_q = f"{bs_dt.year}Q{(bs_dt.month - 1) // 3 + 1}"
+                        if bsc_q == q_name:
+                            for eq_k in ['Stockholders Equity', 'Total Stockholder Equity', 'Common Stock Equity', 'Total Equity Gross Minority Interest']:
+                                if eq_k in q_bs.index and pd.notna(q_bs.loc[eq_k, bsc]):
+                                    eq_val = float(q_bs.loc[eq_k, bsc])
+                                    break
+                            for ast_k in ['Total Assets']:
+                                if ast_k in q_bs.index and pd.notna(q_bs.loc[ast_k, bsc]):
+                                    ast_val = float(q_bs.loc[ast_k, bsc])
+                                    break
+                            break
+
+                ni_val = result["net_income"][i] if i < len(result["net_income"]) else 0.0
+                
+                # 年化 ROE (%) = 淨利 * 4 / 股東權益 * 100
+                if eq_val and eq_val > 0 and ni_val != 0.0:
+                    q_roe = round((ni_val * 4.0 / eq_val) * 100, 2)
+                elif result["roe"] is not None:
+                    q_roe = round(result["roe"], 2)
+                else:
+                    q_roe = 0.0
+                roe_list.append(q_roe)
+
+                # 年化 ROA (%) = 淨利 * 4 / 總資產 * 100
+                if ast_val and ast_val > 0 and ni_val != 0.0:
+                    q_roa = round((ni_val * 4.0 / ast_val) * 100, 2)
+                elif result["roa"] is not None:
+                    q_roa = round(result["roa"], 2)
+                elif is_finance:
+                    q_roa = round(q_roe / 12.5, 2) if q_roe > 0 else 0.8
+                else:
+                    q_roa = round(q_roe / 2.2, 2) if q_roe > 0 else 0.0
+                roa_list.append(q_roa)
+
+                # 槓桿倍數 (權益乘數) = 總資產 / 股東權益
+                if ast_val and eq_val and eq_val > 0:
+                    q_lev = round(ast_val / eq_val, 2)
+                elif q_roa > 0 and q_roe > 0:
+                    q_lev = round(q_roe / q_roa, 2)
+                elif is_finance:
+                    q_lev = 12.5
+                else:
+                    q_lev = 1.8
+                leverage_list.append(q_lev)
+
+                # 每股淨值 BVPS (元)
+                if eq_val and shares_out and shares_out > 0:
+                    q_bvps = round(eq_val / shares_out, 2)
+                elif bvps_latest is not None and bvps_latest > 0:
+                    q_bvps = round(bvps_latest, 2)
+                elif result["pb_ratio"] and result["pb_ratio"] > 0 and p_val > 0:
+                    q_bvps = round(p_val / result["pb_ratio"], 2)
+                else:
+                    q_bvps = 10.0
+                bvps_list.append(q_bvps)
+
+            # 計算滾動 4 季累計 TTM EPS
+            ttm_eps_list = []
+            for i in range(num_q):
+                window_eps = [v for v in result["eps"][max(0, i - 3):i + 1] if v is not None]
+                if len(window_eps) == 4:
+                    ttm_val = round(sum(window_eps), 2)
+                elif len(window_eps) > 0:
+                    ttm_val = round(sum(window_eps) * 4.0 / len(window_eps), 2)
+                elif result["latest_single_eps"]:
+                    ttm_val = round(result["latest_single_eps"] * 4.0, 2)
+                else:
+                    ttm_val = 1.0
+                ttm_eps_list.append(max(ttm_val, 0.1))
+
+            # 4. 本益比河流圖 (PE River Band) 倍數階梯計算
+            cur_pe = result["pe_ratio"]
+            if cur_pe and cur_pe > 0:
+                if cur_pe <= 12:
+                    pe_mults = [8.0, 10.0, 12.0, 15.0, 18.0]
+                elif cur_pe <= 18:
+                    pe_mults = [10.0, 13.0, 16.0, 20.0, 24.0]
+                elif cur_pe <= 28:
+                    pe_mults = [14.0, 18.0, 22.0, 26.0, 32.0]
+                elif cur_pe <= 45:
+                    pe_mults = [18.0, 24.0, 30.0, 38.0, 48.0]
+                else:
+                    base_p = round(cur_pe / 5.0) * 5.0
+                    pe_mults = [round(base_p * 0.6), round(base_p * 0.8), base_p, round(base_p * 1.25), round(base_p * 1.5)]
+            else:
+                pe_mults = [12.0, 16.0, 20.0, 24.0, 28.0]
+
+            pe_bands = {
+                f"{m:.0f}x" if m == int(m) else f"{m:.1f}x": [round(ttm * m, 2) for ttm in ttm_eps_list]
+                for m in pe_mults
+            }
+
+            # 5. 股價淨值比河流圖 (PB River Band) 倍數階梯計算
+            cur_pb = result["pb_ratio"]
+            if cur_pb and cur_pb > 0:
+                if cur_pb <= 1.2:
+                    pb_mults = [0.8, 1.0, 1.2, 1.4, 1.6]
+                elif cur_pb <= 2.2:
+                    pb_mults = [1.0, 1.3, 1.6, 1.9, 2.3]
+                elif cur_pb <= 3.8:
+                    pb_mults = [1.5, 2.0, 2.6, 3.2, 4.0]
+                else:
+                    base_b = round(cur_pb, 1)
+                    pb_mults = [round(base_b * 0.6, 2), round(base_b * 0.8, 2), base_b, round(base_b * 1.25, 2), round(base_b * 1.5, 2)]
+            else:
+                pb_mults = [1.0, 1.3, 1.6, 1.9, 2.2]
+
+            pb_bands = {
+                f"{m:.1f}x" if m != int(m) else f"{m:.0f}x": [round(bv * m, 2) for bv in bvps_list]
+                for m in pb_mults
+            }
+
+            # 6. 計算當前最新市價之估值位階
+            p_check = price_list[-1] if price_list and price_list[-1] > 0 else cur_p
+            
+            # PE 位階
+            latest_pe_levels = [pe_bands[k][-1] for k in pe_bands]
+            if p_check < latest_pe_levels[0]:
+                pe_zone = f"💎 極端低估區 (< {pe_mults[0]:.0f}x)"
+            elif p_check < latest_pe_levels[1]:
+                pe_zone = f"🟢 超值便宜區 ({pe_mults[0]:.0f}x ~ {pe_mults[1]:.0f}x)"
+            elif p_check < latest_pe_levels[2]:
+                pe_zone = f"🔵 合理偏低區 ({pe_mults[1]:.0f}x ~ {pe_mults[2]:.0f}x)"
+            elif p_check < latest_pe_levels[3]:
+                pe_zone = f"🟠 合理偏高區 ({pe_mults[2]:.0f}x ~ {pe_mults[3]:.0f}x)"
+            elif p_check < latest_pe_levels[4]:
+                pe_zone = f"🔴 昂貴過熱區 ({pe_mults[3]:.0f}x ~ {pe_mults[4]:.0f}x)"
+            else:
+                pe_zone = f"⚠️ 極端高估區 (> {pe_mults[4]:.0f}x)"
+
+            # PB 位階
+            latest_pb_levels = [pb_bands[k][-1] for k in pb_bands]
+            if p_check < latest_pb_levels[0]:
+                pb_zone = f"💎 循環谷底超值區 (< {pb_mults[0]:.1f}x)"
+            elif p_check < latest_pb_levels[1]:
+                pb_zone = f"🟢 便宜安全邊際區 ({pb_mults[0]:.1f}x ~ {pb_mults[1]:.1f}x)"
+            elif p_check < latest_pb_levels[2]:
+                pb_zone = f"🔵 合理偏低區 ({pb_mults[1]:.1f}x ~ {pb_mults[2]:.1f}x)"
+            elif p_check < latest_pb_levels[3]:
+                pb_zone = f"🟠 合理偏高區 ({pb_mults[2]:.1f}x ~ {pb_mults[3]:.1f}x)"
+            elif p_check < latest_pb_levels[4]:
+                pb_zone = f"🔴 循環高檔昂貴區 ({pb_mults[3]:.1f}x ~ {pb_mults[4]:.1f}x)"
+            else:
+                pb_zone = f"⚠️ 極端溢價區 (> {pb_mults[4]:.1f}x)"
+
+            result["roe_history"] = roe_list
+            result["roa_history"] = roa_list
+            result["leverage_history"] = leverage_list
+            result["bvps_history"] = bvps_list
+            result["ttm_eps_history"] = ttm_eps_list
+            result["quarterly_prices"] = price_list
+            result["pe_multipliers"] = pe_mults
+            result["pe_river_bands"] = pe_bands
+            result["pb_multipliers"] = pb_mults
+            result["pb_river_bands"] = pb_bands
+            result["current_pe_zone"] = pe_zone
+            result["current_pb_zone"] = pb_zone
+            if (result.get("roe") is None or result["roe"] == 0.0) and roe_list and any(v > 0 for v in roe_list):
+                result["roe"] = roe_list[-1]
+            if (result.get("roa") is None or result["roa"] == 0.0) and roa_list and any(v > 0 for v in roa_list):
+                result["roa"] = roa_list[-1]
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -1395,6 +1636,8 @@ def get_single_stock_fundamental_data(
     pe_ratio = val_info.get('pe_ratio')
     pb_ratio = val_info.get('pb_ratio')
     div_per_share = val_info.get('dividend_per_share')
+    roe = None
+    roa = None
 
     if is_finance:
         gross_margin = None
@@ -1444,6 +1687,10 @@ def get_single_stock_fundamental_data(
                 pe_ratio = q_hist['pe_ratio']
             if pb_ratio is None and q_hist.get('pb_ratio') is not None:
                 pb_ratio = q_hist['pb_ratio']
+            if roe is None and q_hist.get('roe') is not None:
+                roe = q_hist['roe']
+            if roa is None and q_hist.get('roa') is not None:
+                roa = q_hist['roa']
         except Exception:
             pass
 
@@ -1544,6 +1791,8 @@ def get_single_stock_fundamental_data(
         "每股股利(元)": div_per_share,
         "本益比(PE)": pe_ratio,
         "股價淨值比(PB)": pb_ratio,
+        "ROE(%)": roe,
+        "ROA(%)": roa,
         "營收備註": note,
         "是否金融業": is_finance,
         "標籤": " ".join(tags) if tags else "穩健"
@@ -3677,7 +3926,12 @@ if hist_close is not None and not hist_close.empty:
                     dy_str = "0.00% (未配息)"
                 dps_val = selected_row.get('每股股利(元)')
                 dps_str = f" | 每股配息 {dps_val:.2f}元" if pd.notna(dps_val) and dps_val > 0 else ""
-                roe_str = f"{q_hist['roe']:.1f}%" if q_hist.get('roe') is not None else "N/A"
+                
+                # ROE & ROA
+                roe_val = q_hist.get('roe') if q_hist.get('roe') is not None else selected_row.get('ROE(%)')
+                roa_val = q_hist.get('roa') if q_hist.get('roa') is not None else selected_row.get('ROA(%)')
+                roe_str = f"{roe_val:.1f}%" if (pd.notna(roe_val) and roe_val is not None) else "N/A"
+                roa_str = f"{roa_val:.1f}%" if (pd.notna(roa_val) and roa_val is not None) else "N/A"
                 
                 cum_eps_val = selected_row.get('累計每股盈餘(元)')
                 cum_lbl = selected_row.get('累計獲利期間', '累計')
@@ -3686,15 +3940,17 @@ if hist_close is not None and not hist_close.empty:
                 render_metric_card(
                     "🌱 股利殖利率與獲利指標 (EPS)",
                     f"殖利率: {dy_str} | 單季 EPS: {selected_row['最新單季EPS(元)']:+.2f}元",
-                    f"ROE: {roe_str}{dps_str}{cum_str}",
+                    f"ROE: {roe_str} | ROA: {roa_str}{dps_str}{cum_str}",
                     value_color="#10b981" if (pd.notna(dy_val) and dy_val >= 4.0) else "#f59e0b"
                 )
 
-            # 圖表展示：雙欄佈局
-            chart_tab1, chart_tab2, chart_tab3 = st.tabs([
+            # 圖表展示：5 大專業財報視覺化分頁
+            chart_tab1, chart_tab2, chart_tab3, chart_tab4, chart_tab5 = st.tabs([
                 "📊 每月營收雙軸走勢圖 (多月份長週期)",
                 "📈 跨季財報三率趨勢圖",
-                "💵 單季 EPS 與獲利走勢圖"
+                "💵 單季 EPS 與獲利走勢圖",
+                "🌈 本益比 / 淨值比河流圖 (估值位階與買點檢驗)",
+                "🧬 歷季 ROE & ROA 走勢圖 (資本效率與真實槓桿)"
             ])
 
             # ── 圖表 1：每月營收雙軸走勢圖 (多月份長週期) ──
@@ -3866,7 +4122,226 @@ if hist_close is not None and not hist_close.empty:
                     cum_str = f"（{cum_period_txt}：**{cum_eps_disp:+.2f} 元**）" if pd.notna(cum_eps_disp) and cum_eps_disp != 0 else ""
                     st.info(f"💡 {selected_name} 最新單季基本每股盈餘 (EPS)：**{selected_row['最新單季EPS(元)']:+.2f} 元** {cum_str}。")
 
-            # 個股體檢診斷筆記 (包含營收與毛利率剪刀差關係評析)
+            # ── 圖表 4：本益比 / 淨值比河流圖 (支援成長股與景氣循環股自由切換) ──
+            with chart_tab4:
+                is_fin_target = selected_row.get('是否金融業', False) or pd.isna(selected_row.get('毛利率(%)'))
+                cur_price = float(selected_row.get('最新市價', 0.0))
+
+                # 手動切換單選鈕 (預設非金融股切 PE，金融股切 PB；景氣循環股如航運、鋼鐵、塑化可由用戶自由點選切換)
+                river_choice = st.radio(
+                    "🔍 選擇估值河流圖模型 (支援成長股與景氣循環股/金融股彈性自由切換)：",
+                    ["📈 本益比河流圖 (PE River Band)", "📊 股價淨值比河流圖 (PB River Band)"],
+                    horizontal=True,
+                    index=1 if is_fin_target else 0,
+                    key=f"river_choice_{selected_code}"
+                )
+                
+                use_pe_model = "本益比" in river_choice
+                q_list = q_hist.get("quarters", [])
+                p_list = q_hist.get("quarterly_prices", [])
+
+                if use_pe_model:
+                    bands_dict = q_hist.get("pe_river_bands", {})
+                    multipliers = q_hist.get("pe_multipliers", [12.0, 16.0, 20.0, 24.0, 28.0])
+                    zone_str = q_hist.get("current_pe_zone") or "評估中"
+                    model_title = "本益比 (PE) 河流圖"
+                    base_metric_name = "近四季累計 EPS (TTM)"
+                    base_metric_vals = q_hist.get("ttm_eps_history", [])
+                    cur_multiple_val = selected_row.get('本益比(PE)') or q_hist.get('pe_ratio')
+                else:
+                    bands_dict = q_hist.get("pb_river_bands", {})
+                    multipliers = q_hist.get("pb_multipliers", [1.0, 1.3, 1.6, 1.9, 2.2])
+                    zone_str = q_hist.get("current_pb_zone") or "評估中"
+                    model_title = "股價淨值比 (PB) 河流圖"
+                    base_metric_name = "每股淨值 (BVPS)"
+                    base_metric_vals = q_hist.get("bvps_history", [])
+                    cur_multiple_val = selected_row.get('股價淨值比(PB)') or q_hist.get('pb_ratio')
+
+                # 位階摘要卡片
+                b_c1, b_c2, b_c3, b_c4 = st.columns([1.5, 1, 1, 1])
+                with b_c1:
+                    st.markdown(f"#### 估值位階判定：**{zone_str}**")
+                with b_c2:
+                    st.metric("最新市價", f"${cur_price:,.2f}" if cur_price > 0 else "N/A")
+                with b_c3:
+                    st.metric(f"當前 {'PE' if use_pe_model else 'PB'}", f"{cur_multiple_val:.2f} 倍" if pd.notna(cur_multiple_val) and cur_multiple_val > 0 else "N/A")
+                with b_c4:
+                    latest_base = base_metric_vals[-1] if base_metric_vals else 0.0
+                    st.metric(f"最新 {base_metric_name.split(' ')[0]}", f"${latest_base:.2f}" if latest_base > 0 else "N/A")
+
+                if q_list and len(q_list) >= 2 and bands_dict:
+                    fig_river = go.Figure()
+                    band_keys = list(bands_dict.keys())
+                    zone_fills = [
+                        ("rgba(16, 185, 129, 0.16)", "🟢 超值便宜區"),
+                        ("rgba(59, 130, 246, 0.16)", "🔵 合理偏低區"),
+                        ("rgba(245, 158, 11, 0.16)", "🟠 合理偏高區"),
+                        ("rgba(239, 68, 68, 0.16)", "🔴 昂貴過熱區")
+                    ]
+                    line_colors = ["#10b981", "#3b82f6", "#6366f1", "#f59e0b", "#ef4444"]
+                    
+                    # 第 0 條底限線
+                    if len(band_keys) > 0:
+                        k0 = band_keys[0]
+                        fig_river.add_trace(go.Scatter(
+                            x=q_list,
+                            y=bands_dict[k0],
+                            name=f"{k0} (超值底限)",
+                            mode="lines",
+                            line=dict(color=line_colors[0], width=1.5, dash="dash"),
+                            hoverinfo="x+y+name"
+                        ))
+                    
+                    # 第 1 ~ 4 條填色階梯線
+                    for b_idx in range(1, len(band_keys)):
+                        bk = band_keys[b_idx]
+                        fill_col, zone_desc = zone_fills[b_idx - 1]
+                        fig_river.add_trace(go.Scatter(
+                            x=q_list,
+                            y=bands_dict[bk],
+                            name=f"{bk} ({zone_desc})",
+                            mode="lines",
+                            line=dict(color=line_colors[b_idx], width=1.5, dash="dot" if b_idx in [1, 3] else "solid"),
+                            fill="tonexty",
+                            fillcolor=fill_col,
+                            hoverinfo="x+y+name"
+                        ))
+
+                    # 疊加季末/當前股價實體走勢線
+                    fig_river.add_trace(go.Scatter(
+                        x=q_list,
+                        y=p_list,
+                        name="季末/當前股價",
+                        mode="lines+markers+text",
+                        text=[f"${p:.1f}" if p > 0 else "" for p in p_list],
+                        textposition="top center",
+                        line=dict(color="#ffffff", width=3.5),
+                        marker=dict(size=8, color="#fbbf24", line=dict(color="#ffffff", width=1.5)),
+                        hoverinfo="x+y+name"
+                    ))
+
+                    fig_river.update_layout(
+                        title=f"🌈 {selected_name} ({selected_code}) {model_title} (涵蓋近 {len(q_list)} 季動態估值通道)",
+                        xaxis=dict(title="季度"),
+                        yaxis=dict(title="股價 (新台幣元)", showgrid=True),
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                        height=460,
+                        margin=dict(l=40, r=40, t=60, b=40)
+                    )
+                    st.plotly_chart(fig_river, use_container_width=True)
+
+                    if use_pe_model:
+                        st.caption("💡 **本益比 (PE) 河流圖實戰指南**：本益比河流圖適用於獲利持續穩定或成長型企業（如半導體、電子代工、IC 設計等）。以滾動四季 TTM EPS 乘以 5 組動態倍數通道繪製。當股價位處**下層綠色/藍色通道**，表示當前估值具備安全邊際，通常為長期佈局優良買點；若突破**上層橙色/紅色通道**，代表市場給予極高溢價，需提防估值修正風險。")
+                    else:
+                        st.caption("💡 **股價淨值比 (PB) 河流圖實戰指南**：股價淨值比河流圖為**【景氣循環股】（航運、鋼鐵、塑化、記憶體、面板）與【金融金控業】**的核心選股利器！景氣循環股於景氣谷底時獲利大幅衰退甚至虧損，致使本益比虛高失真；但其每股淨值 (BVPS) 具備資產保值底蘊。善用 PB 河流圖能在循環低檔（通常落在 1.0x 淨值以下或歷史低檔綠色區）精準捕捉**「買在賠錢低 PB、賣在暴賺高 PB」**之逆向佈局甜蜜點！金融股亦長年以淨值比評定資產安全邊際。")
+                else:
+                    st.info(f"💡 {selected_name} 歷史季度淨值或 EPS 數據不足 2 季，暫無法繪製連續河流圖。目前最新市價為 **${cur_price:.2f}**，估值位階評定為 **{zone_str}**。")
+
+            # ── 圖表 5：歷季 ROE & ROA 走勢圖 (杜邦分析拆解) ──
+            with chart_tab5:
+                q_list = q_hist.get("quarters", [])
+                roe_list = q_hist.get("roe_history", [])
+                roa_list = q_hist.get("roa_history", [])
+                leverage_list = q_hist.get("leverage_history", [])
+
+                latest_roe = roe_list[-1] if roe_list else (q_hist.get('roe') or 0.0)
+                latest_roa = roa_list[-1] if roa_list else (q_hist.get('roa') or 0.0)
+                latest_lev = leverage_list[-1] if leverage_list else (round(latest_roe / latest_roa, 2) if latest_roa > 0 else 1.0)
+
+                # 4 大杜邦關鍵摘要指標卡片
+                rc1, rc2, rc3, rc4 = st.columns(4)
+                with rc1:
+                    roe_delta_str = "達巴菲特 15% 門檻" if latest_roe >= 15.0 else ("穩健健全" if latest_roe >= 10.0 else "低於 10% 基準")
+                    st.metric("最新年化 ROE (股東權益報酬率)", f"{latest_roe:.2f}%", delta=roe_delta_str, delta_color="normal" if latest_roe >= 15.0 else "off")
+                with rc2:
+                    roa_delta_str = "資產運用極優" if latest_roa >= 8.0 else ("健全" if latest_roa >= 4.0 else "微薄/偏低")
+                    st.metric("最新年化 ROA (資產報酬率)", f"{latest_roa:.2f}%", delta=roa_delta_str, delta_color="normal" if latest_roa >= 4.0 else "inverse")
+                with rc3:
+                    lev_eval = "金融金控合理結構" if selected_row.get('是否金融業') else ("高槓桿運作" if latest_lev >= 4.0 else "財務穩健")
+                    st.metric("權益乘數 (真實財務槓桿)", f"{latest_lev:.2f} 倍", delta=lev_eval, delta_color="off")
+                with rc4:
+                    if latest_roe >= 15.0 and (latest_lev < 4.0 or selected_row.get('是否金融業')):
+                        buffett_rank = "🌟 優秀卓越 (巴菲特級選股)"
+                    elif latest_roe >= 10.0:
+                        buffett_rank = "⚡ 穩健良好 (獲利能力健康)"
+                    else:
+                        buffett_rank = "⚠️ 資本效率待強化 (<10%)"
+                    st.metric("資本回報綜合評級", buffett_rank)
+
+                if q_list and len(q_list) >= 2:
+                    fig_dupont = go.Figure()
+                    
+                    # 1. ROE 綠色粗實線
+                    fig_dupont.add_trace(go.Scatter(
+                        x=q_list,
+                        y=roe_list,
+                        name="股東權益報酬率 ROE (%)",
+                        mode="lines+markers+text",
+                        text=[f"{v:.1f}%" for v in roe_list],
+                        textposition="top center",
+                        line=dict(color="#10b981", width=3.2),
+                        marker=dict(size=7),
+                        yaxis="y1"
+                    ))
+                    
+                    # 2. ROA 藍色實線
+                    fig_dupont.add_trace(go.Scatter(
+                        x=q_list,
+                        y=roa_list,
+                        name="資產報酬率 ROA (%)",
+                        mode="lines+markers+text",
+                        text=[f"{v:.1f}%" for v in roa_list],
+                        textposition="bottom center",
+                        line=dict(color="#3b82f6", width=2.5),
+                        marker=dict(size=6),
+                        yaxis="y1"
+                    ))
+
+                    # 3. 權益乘數 (槓桿倍數) 紫色淡柱 (副軸)
+                    max_lev = max(leverage_list) if leverage_list else 10.0
+                    fig_dupont.add_trace(go.Bar(
+                        x=q_list,
+                        y=leverage_list,
+                        name="權益乘數 (槓桿倍數 = 資產/淨值)",
+                        marker_color="rgba(168, 85, 247, 0.22)",
+                        text=[f"{v:.1f}x" for v in leverage_list],
+                        textposition="outside",
+                        yaxis="y2"
+                    ))
+
+                    # 4. 巴菲特 15% 基準黃色虛線
+                    fig_dupont.add_hline(
+                        y=15.0,
+                        line_dash="dash",
+                        line_color="#f59e0b",
+                        annotation_text="巴菲特長線優質企業基準線 (ROE ≥ 15%)",
+                        annotation_position="top left",
+                        annotation_font=dict(color="#f59e0b", size=11)
+                    )
+
+                    fig_dupont.update_layout(
+                        title=f"🧬 {selected_name} ({selected_code}) 歷季資本回報率與財務槓桿走勢 (杜邦分析拆解)",
+                        xaxis=dict(title="季度"),
+                        yaxis=dict(title="報酬率 (%)", side="left", zeroline=True),
+                        yaxis2=dict(title="權益乘數 (槓桿倍數)", side="right", overlaying="y", showgrid=False, range=[0, max(max_lev * 1.5, 6.0)]),
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                        height=440,
+                        margin=dict(l=40, r=40, t=60, b=40)
+                    )
+                    st.plotly_chart(fig_dupont, use_container_width=True)
+
+                    st.caption("""
+                    ℹ️ **杜邦分析 (DuPont Analysis) 與真實財務槓桿解讀**：
+                    1. **ROE (股東權益報酬率) = 稅後淨利 / 股東權益**：衡量公司替股東每投入一塊錢賺回多少利潤。股神巴菲特挑選偉大企業的核心標準為「連續多年維持 ROE ≥ 15%」。
+                    2. **ROA (資產報酬率) = 稅後淨利 / 總資產**：衡量公司運用全體資產（包含借款負債）創造利潤的能力，排除了財務槓桿的干擾，最能體現公司本業的真實營運效率。
+                    3. **權益乘數 (財務槓桿倍數) = 總資產 / 股東權益 = ROE / ROA**：
+                       - **科技製造業與一般企業**：若 ROE 高（如 20%）但 ROA 很低（如 2%~3%），權益乘數高達 6~10 倍以上，代表該公司高 ROE 是靠「借巨額債務放大」而來，財務風險甚高；若 ROA 同樣高達 8%~15% 以上，代表其高 ROE 是來自「核心產品高定價權與高資產周轉率」，體質極度健康！
+                       - **金控與銀行業**：銀行吸納大眾存款本質即屬負債，因此槓桿乘數天然偏高（通常在 10 ~ 15 倍以上）。評估金控的核心關鍵在於 ROA 能否維持在 0.6% ~ 1.0% 以上，並維持逾放比極低，即能轉化為高達 10% ~ 15% 的穩健年化 ROE！
+                    """)
+                else:
+                    st.info(f"💡 {selected_name} 歷史季度資產負債數據不足 2 季。最新 ROE 為 **{latest_roe:.2f}%**，ROA 為 **{latest_roa:.2f}%**。")
+
+            # 個股體檢診斷筆記 (包含營收與毛利率剪刀差關係評析、河流圖估值位階與杜邦分析)
             with st.expander(f"📝 【{selected_name} ({selected_code})】 基本面體檢與診斷筆記", expanded=True):
                 diag_mom_text = "月增成長" if selected_row['營收月增(MoM%)'] > 0 else "月增衰退"
                 diag_yoy_text = "年增成長" if selected_row['營收年增(YoY%)'] > 0 else "年增衰退"
@@ -3877,6 +4352,15 @@ if hist_close is not None and not hist_close.empty:
 
                 is_fin_target = selected_row.get('是否金融業', False) or pd.isna(selected_row.get('毛利率(%)')) or pd.isna(selected_row.get('營業利益率(%)'))
                 
+                # 河流圖估值位階文字
+                pe_zone_txt = q_hist.get("current_pe_zone") or "評估中"
+                pb_zone_txt = q_hist.get("current_pb_zone") or "評估中"
+
+                # 杜邦槓桿與 ROE/ROA
+                latest_roe_diag = q_hist.get("roe") or (q_hist["roe_history"][-1] if q_hist.get("roe_history") else 0.0)
+                latest_roa_diag = q_hist.get("roa") or (q_hist["roa_history"][-1] if q_hist.get("roa_history") else 0.0)
+                latest_lev_diag = q_hist["leverage_history"][-1] if q_hist.get("leverage_history") else (round(latest_roe_diag / latest_roa_diag, 2) if latest_roa_diag > 0 else 1.0)
+
                 if is_fin_target:
                     nm_val = selected_row['稅後淨利率(%)']
                     if nm_val >= 35.0:
@@ -3893,7 +4377,9 @@ if hist_close is not None and not hist_close.empty:
                     - **金融獲利體質診斷**：{scissor_diag}
                     - **核心利潤率檢驗**：最新單季稅後淨利率高達 **{selected_row['稅後淨利率(%)']:.2f}%**（會計準則無營業毛利與營業利益科目，證交所填報 `--` 不適用）。
                     - **每股盈餘獲利動能 (EPS)**：最新單季基本每股盈餘為 **{selected_row['最新單季EPS(元)']:+.2f} 元**{cum_eps_note}。
-                    - **資本報酬與評價**：目前 ROE 約 **{roe_str}**，本益比約 **{pe_str}**，股價淨值比約 **{pb_str}**。
+                    - **資本報酬與評價指標**：目前 ROE 約 **{roe_str}**，ROA 約 **{roa_str}**，本益比約 **{pe_str}**，股價淨值比約 **{pb_str}**。
+                    - **估值河流圖與位階判定**：目前 PE 位階為 **{pe_zone_txt}**，PB 位階為 **{pb_zone_txt}**。金控銀行業因持股與負債資產規模龐大，法人評價核心首重**股價淨值比 (PB)**，建議切換至【PB 淨值比河流圖】觀察歷史循環買點與安全邊際。
+                    - **杜邦資本效率與槓桿體質**：最新 ROE 為 **{latest_roe_diag:.2f}%**，ROA 為 **{latest_roa_diag:.2f}%**，推算財務權益乘數約 **{latest_lev_diag:.1f} 倍**（金融業吸納大眾存款自然形成經營槓桿，在低逾放與健全資本適足率下展現高效資本回報）。
                     """)
                 else:
                     diag_margin_text = "毛利率高於 30%，具備強大產品競爭力/護城河" if (selected_row['毛利率(%)'] and selected_row['毛利率(%)'] >= 30.0) else ("毛利率介於 15%~30%，體質穩健" if (selected_row['毛利率(%)'] and selected_row['毛利率(%)'] >= 15.0) else "毛利率低於 15%，屬薄利或成熟競爭市場")
@@ -3915,11 +4401,16 @@ if hist_close is not None and not hist_close.empty:
                     else:
                         scissor_diag = f"💀 **【量利齊跌 / 景氣下行警戒】** 營收年減 **{yoy_val:+.2f}%** 且毛利率處於 **{gm_val:.2f}%**（季變動 {gm_change:+.2f}%），面臨需求走弱與利潤率壓縮雙重挑戰，需留意產業景氣落底信號。"
 
+                    is_cyclical = any(k in selected_name for k in ["長榮", "陽明", "萬海", "中鋼", "台塑", "南亞", "台化", "友達", "群創", "彩晶", "南亞科", "旺宏", "華邦電"]) or selected_code in ["2603", "2609", "2615", "2002", "1301", "1303", "1326", "2409", "3481", "6116", "2408", "2337", "2344"]
+                    cyclical_hint = "（💡 此標的具備顯著**景氣循環股**特徵，循環谷底時 EPS 常暴跌或轉負使本益比失真，建議上方切換至【📊 股價淨值比河流圖 (PB)】捕捉經典『低 PB 谷底逆向佈局』時機！）" if is_cyclical else "（成長股建議以【PE 本益比河流圖】檢視通道位階；若面臨產業劇烈波動或獲利暫時衰退，亦可切換至【PB 淨值比河流圖】檢驗資產底線）"
+
                     st.markdown(f"""
                     - **營收動能評等**：當月營收呈現 **{diag_mom_text} ({selected_row['營收月增(MoM%)']:+.2f}%)** 與 **{diag_yoy_text} ({selected_row['營收年增(YoY%)']:+.2f}%)**。累計年增率為 **{selected_row['累計年增(%)']:+.2f}%**。
                     - **營收與毛利剪刀差診斷**：{scissor_diag}
                     - **本業競爭力與產品毛利**：最新申報毛利率為 **{selected_row['毛利率(%)']:.2f}%**（{diag_margin_text}）。營業利益率為 **{selected_row['營業利益率(%)']:.2f}%**。
                     - **淨利結構檢驗**：稅後淨利率 **{selected_row['稅後淨利率(%)']:.2f}%** 與營業利益率相較，{'業外損益貢獻正面' if selected_row['稅後淨利率(%)'] >= selected_row['營業利益率(%)'] else '業外支出略有侵蝕或所得稅提列'}。
                     - **每股盈餘獲利動能 (EPS)**：最新單季基本每股盈餘為 **{selected_row['最新單季EPS(元)']:+.2f} 元**{cum_eps_note}。
-                    - **評價估值水位**：目前本益比約 **{pe_str}**，股價淨值比約 **{pb_str}**。
+                    - **資本報酬與評價指標**：目前 ROE 約 **{roe_str}**，ROA 約 **{roa_str}**，本益比約 **{pe_str}**，股價淨值比約 **{pb_str}**。
+                    - **估值河流圖與位階判定**：目前 PE 位階為 **{pe_zone_txt}**，PB 位階為 **{pb_zone_txt}**。{cyclical_hint}
+                    - **杜邦資本效率與槓桿體質**：最新 ROE 為 **{latest_roe_diag:.2f}%**，ROA 為 **{latest_roa_diag:.2f}%**，權益乘數為 **{latest_lev_diag:.1f} 倍**（{'高資產運用效率驅動之優質體質' if latest_roa_diag >= 6.0 else ('負債槓桿放大推動，需留意財務負擔' if latest_lev_diag >= 4.0 else '財務結構穩健健全'}）。
                     """)
