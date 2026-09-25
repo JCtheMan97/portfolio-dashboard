@@ -17,6 +17,7 @@ except Exception:
     TW_TZ = timezone(timedelta(hours=8))
 import requests
 from bs4 import BeautifulSoup
+from io import StringIO
 
 warnings.filterwarnings('ignore')
 
@@ -640,15 +641,88 @@ def fetch_twse_tpex_financial_ratios():
 
     return ratios_data
 
+@st.cache_data(ttl=86400)
+def fetch_mops_q1_financials(year_roc="115"):
+    """
+    從公開資訊觀測站 (MOPS) 彙總表取得全市場 Q1 財務數據 (每股盈餘、營業收入、稅後淨利)。
+    供半年報 (Q2) 或後續累計申報推導純單季 (Single-Quarter) 財務數字使用。
+    """
+    q1_data = {}
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Referer': 'https://mops.twse.com.tw/mops/web/t163sb04'
+    }
+    
+    def _clean_val(v):
+        try:
+            if v is None or pd.isna(v):
+                return 0.0
+            s = str(v).strip().replace(',', '')
+            if s.startswith('(') and s.endswith(')'):
+                s = '-' + s[1:-1]
+            if s in ["--", "-", "N/A", "nan", "None", ""]:
+                return 0.0
+            return float(s)
+        except Exception:
+            return 0.0
+
+    # 包含上市 (sii) 與上櫃 (otc)
+    for typek in ['sii', 'otc']:
+        try:
+            payload = {
+                'encodeURIComponent': '1',
+                'step': '1',
+                'firstin': '1',
+                'off': '1',
+                'TYPEK': typek,
+                'year': str(year_roc),
+                'season': '01'
+            }
+            r = requests.post("https://mops.twse.com.tw/mops/web/ajax_t163sb04", data=payload, headers=headers, timeout=8.0)
+            if r.status_code == 200 and ("公司代號" in r.text or "基本每股盈餘" in r.text):
+                dfs = pd.read_html(StringIO(r.text))
+                for df in dfs:
+                    if isinstance(df.columns, pd.MultiIndex):
+                        df.columns = ['_'.join([str(c) for c in col if str(c) != 'nan']).strip() for col in df.columns]
+                    else:
+                        df.columns = [str(c).strip() for c in df.columns]
+                    
+                    code_col = next((c for c in df.columns if "公司代號" in c or "代號" in c), None)
+                    eps_col = next((c for c in df.columns if "每股盈餘" in c or "EPS" in c.upper()), None)
+                    rev_col = next((c for c in df.columns if "營業收入" in c or "營收" in c), None)
+                    ni_col = next((c for c in df.columns if "本期淨利" in c or "稅後淨利" in c or "淨利" in c), None)
+                    
+                    if code_col and eps_col:
+                        for _, row in df.iterrows():
+                            raw_c = str(row.get(code_col, '')).strip()
+                            if raw_c.isdigit() and len(raw_c) in [4, 5]:
+                                eps_v = _clean_val(row.get(eps_col))
+                                rev_v = _clean_val(row.get(rev_col)) if rev_col else 0.0
+                                ni_v = _clean_val(row.get(ni_col)) if ni_col else 0.0
+                                q1_data[raw_c] = {
+                                    "eps": eps_v,
+                                    "operating_revenue": rev_v, # 千元
+                                    "net_income": ni_v          # 千元
+                                }
+        except Exception:
+            pass
+            
+    return q1_data
+
 @st.cache_data(ttl=3600)
 def fetch_twse_tpex_eps_data():
-    """從 TWSE 與 TPEx 官方 OpenAPI 獲取全市場最新每股盈餘 (EPS) 與損益資料 (含三率計算)"""
+    """從 TWSE 與 TPEx 官方 OpenAPI 獲取全市場最新每股盈餘 (EPS) 與損益資料 (自動將累計數據推導為純單季 EPS)"""
     eps_data = {}
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
 
     def _to_float(val):
         try:
-            return float(str(val).replace(',', ''))
+            if val is None or val == "" or val == "N/A" or val == "-" or val == "--":
+                return 0.0
+            s = str(val).replace(',', '')
+            if s.startswith('(') and s.endswith(')'):
+                s = '-' + s[1:-1]
+            return float(s)
         except (ValueError, TypeError):
             return 0.0
 
@@ -662,33 +736,65 @@ def fetch_twse_tpex_eps_data():
         quarter = str(item.get("季別", "")).strip()
         eps_val = _to_float(item.get("基本每股盈餘(元)", item.get("基本每股盈餘", 0)))
         op_rev = _to_float(item.get("營業收入", 0))
-        op_income = _to_float(item.get("營業利益", 0))
         net_income = _to_float(item.get("稅後淨利", item.get("本期淨利", 0)))
         non_op = _to_float(item.get("營業外收入及支出", 0))
         
-        gross_profit = _to_float(item.get("營業毛利", item.get("營業毛利(毛損)淨額", 0)))
-        if gross_profit == 0.0 and "營業成本" in item and op_rev > 0:
-            gross_profit = op_rev - _to_float(item.get("營業成本", 0))
+        # 營業利益：金融金控業官方填報為 "--" (不適用)，需保留 None 以免誤判為 0 元
+        raw_op_income = str(item.get("營業利益", item.get("營業利益(損失)", item.get("OperatingIncome", "")))).strip()
+        if raw_op_income in ["--", "-", "N/A", "nan", "None", ""]:
+            op_income = None
+            op_margin = None
+        else:
+            op_income = _to_float(raw_op_income)
+            op_margin = round((op_income / op_rev * 100), 2) if op_rev > 0 else 0.0
 
-        gross_margin = (gross_profit / op_rev * 100) if op_rev > 0 and gross_profit != 0.0 else 0.0
-        op_margin = (op_income / op_rev * 100) if op_rev > 0 else 0.0
-        net_margin = (net_income / op_rev * 100) if op_rev > 0 else 0.0
+        # 營業毛利：金融金控業無毛利科目，官方填報為 "--" (不適用)
+        raw_gross = str(item.get("營業毛利", item.get("營業毛利(毛損)淨額", item.get("GrossProfit", "")))).strip()
+        if raw_gross in ["--", "-", "N/A", "nan", "None", ""]:
+            gross_profit = None
+            gross_margin = None
+        else:
+            gross_profit = _to_float(raw_gross)
+            if gross_profit == 0.0 and "營業成本" in item and op_rev > 0:
+                gross_profit = op_rev - _to_float(item.get("營業成本", 0))
+            gross_margin = round((gross_profit / op_rev * 100), 2) if (op_rev > 0 and gross_profit != 0.0) else 0.0
+
+        net_margin = round((net_income / op_rev * 100), 2) if op_rev > 0 else 0.0
+
+        q_num = int(quarter) if quarter.isdigit() else 2
+        if q_num == 1:
+            cum_label = f"{year}年第1季"
+        elif q_num == 2:
+            cum_label = f"{year}年上半年累計 (H1)"
+        elif q_num == 3:
+            cum_label = f"{year}年前三季累計"
+        elif q_num == 4:
+            cum_label = f"{year}年全年度累計"
+        else:
+            cum_label = f"{year}Q{quarter} 累計"
 
         eps_data[code] = {
             "code": code,
             "name": name,
             "year": year,
             "quarter": quarter,
-            "eps": eps_val,
-            "operating_revenue": op_rev,
+            "eps": eps_val,              # 官方申報累計每股盈餘 (YTD Cumulative)
+            "cum_eps": eps_val,          # 明確標註累計每股盈餘
+            "cum_label": cum_label,      # 累計期間說明 (如 115年上半年累計 (H1))
+            "operating_revenue": op_rev, # 累計營收 (千元)
+            "cum_revenue": op_rev,
             "operating_income": op_income,
             "non_op_income": non_op,
-            "net_income": net_income,
+            "net_income": net_income,    # 累計稅後淨利 (千元)
+            "cum_net_income": net_income,
             "gross_profit": gross_profit,
-            "gross_margin": round(gross_margin, 2),
-            "operating_margin": round(op_margin, 2),
-            "net_margin": round(net_margin, 2),
-            "market": market
+            "gross_margin": gross_margin,
+            "operating_margin": op_margin,
+            "net_margin": net_margin,
+            "market": market,
+            "single_eps": None,
+            "single_revenue": None,
+            "single_net_income": None
         }
 
     # 1. 證交所 (TWSE 本國上市 + KY 外國上市)
@@ -712,7 +818,43 @@ def fetch_twse_tpex_eps_data():
     except Exception:
         pass
 
+    # 3. 市場級跨期推導：結合 MOPS Q1 損益彙總表，將 H1 半年報累計拆解為真實單季 (Single-Quarter)
+    sample_year = "115"
+    for item in eps_data.values():
+        if item.get("year"):
+            sample_year = item["year"]
+            break
+
+    q1_map = fetch_mops_q1_financials(sample_year)
+    for code, item in eps_data.items():
+        q_str = item.get("quarter", "")
+        if q_str in ["1", "01"]:
+            item["single_eps"] = item["cum_eps"]
+            item["single_revenue"] = item["cum_revenue"]
+            item["single_net_income"] = item["cum_net_income"]
+        elif q_str in ["2", "02"]:
+            q1_item = q1_map.get(code)
+            if q1_item and "eps" in q1_item:
+                q1_eps = q1_item["eps"]
+                item["single_eps"] = round(item["cum_eps"] - q1_eps, 2)
+                item["q1_eps"] = q1_eps
+                
+                q1_rev = q1_item.get("operating_revenue", 0.0)
+                if 0 < q1_rev < item["cum_revenue"]:
+                    item["single_revenue"] = item["cum_revenue"] - q1_rev
+                else:
+                    item["single_revenue"] = item["cum_revenue"]
+                
+                q1_ni = q1_item.get("net_income", 0.0)
+                item["single_net_income"] = item["cum_net_income"] - q1_ni
+            else:
+                # 若無 Q1 記錄，先保留 None，由 fetch_stock_quarterly_history 以 yfinance Q1 作為二級推導
+                item["single_eps"] = None
+                item["single_revenue"] = item["cum_revenue"]
+                item["single_net_income"] = item["cum_net_income"]
+
     return eps_data
+
 
 @st.cache_data(ttl=3600)
 def fetch_twse_tpex_valuation_ratios():
@@ -890,6 +1032,10 @@ fetch_mops_stock_monthly_revenue_history = fetch_stock_monthly_revenue_history
 def fetch_stock_quarterly_history(ticker):
     """獲取個股歷史季度損益表三率、EPS 與評價資訊 (透過 yfinance 快取，並由官方 OpenAPI 校正殖利率/PE/PB)"""
     raw_code = ticker.split('.')[0].strip().upper()
+    is_finance = (
+        raw_code.startswith("28") or 
+        raw_code in ["5880", "5876", "6005", "5871", "6024", "6015", "6016"]
+    )
     result = {
         "quarters": [],
         "revenue": [],
@@ -900,6 +1046,9 @@ def fetch_stock_quarterly_history(ticker):
         "gross_margin": [],
         "operating_margin": [],
         "net_margin": [],
+        "cum_eps": None,
+        "cum_label": None,
+        "latest_single_eps": None,
         "pe_ratio": None,
         "pb_ratio": None,
         "dividend_yield": None,
@@ -978,16 +1127,14 @@ def fetch_stock_quarterly_history(ticker):
                         break
                 result["revenue"].append(rev)
                 
-                gp = 0.0
-                if 'Gross Profit' in q_inc.index and pd.notna(q_inc.loc['Gross Profit', col]):
+                gp = None
+                if not is_finance and 'Gross Profit' in q_inc.index and pd.notna(q_inc.loc['Gross Profit', col]):
                     gp = float(q_inc.loc['Gross Profit', col])
                 result["gross_profit"].append(gp)
                 
-                oi = 0.0
-                for oi_key in ['Operating Income', 'Operating Revenue']:
-                    if oi_key in q_inc.index and pd.notna(q_inc.loc[oi_key, col]):
-                        oi = float(q_inc.loc[oi_key, col])
-                        break
+                oi = None
+                if not is_finance and 'Operating Income' in q_inc.index and pd.notna(q_inc.loc['Operating Income', col]):
+                    oi = float(q_inc.loc['Operating Income', col])
                 result["operating_income"].append(oi)
                 
                 ni = 0.0
@@ -1004,12 +1151,12 @@ def fetch_stock_quarterly_history(ticker):
                         break
                 result["eps"].append(eps_val)
                 
-                gm = (gp / rev * 100) if rev > 0 else 0.0
-                om = (oi / rev * 100) if rev > 0 else 0.0
-                nm = (ni / rev * 100) if rev > 0 else 0.0
-                result["gross_margin"].append(round(gm, 2))
-                result["operating_margin"].append(round(om, 2))
-                result["net_margin"].append(round(nm, 2))
+                gm = round(gp / rev * 100, 2) if (not is_finance and gp is not None and rev > 0) else None
+                om = round(oi / rev * 100, 2) if (not is_finance and oi is not None and rev > 0) else None
+                nm = round(ni / rev * 100, 2) if rev > 0 else 0.0
+                result["gross_margin"].append(gm)
+                result["operating_margin"].append(om)
+                result["net_margin"].append(nm)
     except Exception:
         pass
 
@@ -1023,23 +1170,95 @@ def fetch_stock_quarterly_history(ticker):
             if tw_year and tw_quarter:
                 ad_year = int(tw_year) + 1911 if int(tw_year) < 1900 else int(tw_year)
                 official_q = f"{ad_year}Q{tw_quarter}"
-                official_eps = float(eps_item.get("eps", 0.0))
-                # TWSE OpenAPI 損益金額為千元，乘上 1000 轉為元以與 yfinance 單位一致
-                raw_op_rev = float(eps_item.get("operating_revenue", 0.0))
-                official_rev = raw_op_rev * 1000.0 if raw_op_rev < 1e11 else raw_op_rev
-                raw_net = float(eps_item.get("net_income", 0.0))
-                official_ni = raw_net * 1000.0 if raw_net < 1e11 else raw_net
-                raw_gp = float(eps_item.get("gross_profit", 0.0))
-                official_gp = raw_gp * 1000.0 if raw_gp < 1e11 else raw_gp
-                raw_oi = float(eps_item.get("operating_income", 0.0))
-                official_oi = raw_oi * 1000.0 if raw_oi < 1e11 else raw_oi
-                official_gm = float(eps_item.get("gross_margin", 0.0))
-                official_om = float(eps_item.get("operating_margin", 0.0))
-                official_nm = float(eps_item.get("net_margin", 0.0))
-
-                if official_q not in result["quarters"]:
+                
+                # 累計指標存入 result
+                cum_eps = float(eps_item.get("cum_eps", eps_item.get("eps", 0.0)))
+                cum_label = eps_item.get("cum_label", f"{tw_year}Q{tw_quarter} 累計")
+                result["cum_eps"] = cum_eps
+                result["cum_label"] = cum_label
+                
+                # 單季 EPS 與數據 (優先使用已由 MOPS Q1 差額推導出的 single_eps)
+                single_eps = eps_item.get("single_eps")
+                
+                # 情況 1：yfinance 歷史中已經有此季度 (例如 萬潤 6187 的 2026Q2)
+                if official_q in result["quarters"]:
+                    idx = result["quarters"].index(official_q)
+                    yf_eps = result["eps"][idx]
+                    # yfinance 已有單季數據且不為 0，絕對保留為純單季，不以累計 EPS 覆蓋！
+                    if yf_eps != 0.0:
+                        single_eps = yf_eps
+                    elif single_eps is not None:
+                        result["eps"][idx] = single_eps
+                    
+                    result["latest_single_eps"] = result["eps"][idx]
+                    
+                    # 營業毛利與利益：金融業為 None，其他若 yfinance 缺漏才補
+                    if is_finance:
+                        result["gross_profit"][idx] = None
+                        result["gross_margin"][idx] = None
+                        result["operating_income"][idx] = None
+                        result["operating_margin"][idx] = None
+                    else:
+                        if result["gross_margin"][idx] is None and eps_item.get("gross_margin") is not None:
+                            result["gross_margin"][idx] = float(eps_item["gross_margin"])
+                        if result["operating_margin"][idx] is None and eps_item.get("operating_margin") is not None:
+                            result["operating_margin"][idx] = float(eps_item["operating_margin"])
+                            
+                # 情況 2：yfinance 缺漏此季度 (例如 玉山金 2884 的 2026Q2)
+                else:
+                    # 如果 single_eps 尚未推導出來，嘗試由 yfinance 的 Q1 推導
+                    if single_eps is None:
+                        q1_name = f"{ad_year}Q1"
+                        if q1_name in result["quarters"]:
+                            q1_idx = result["quarters"].index(q1_name)
+                            q1_eps_val = result["eps"][q1_idx]
+                            single_eps = round(cum_eps - q1_eps_val, 2)
+                        elif tw_quarter in ["1", "01"]:
+                            single_eps = cum_eps
+                        else:
+                            # 嘗試從 MOPS Q1 獲取
+                            q1_mops = fetch_mops_q1_financials(tw_year).get(raw_code, {})
+                            if q1_mops.get("eps") is not None and q1_mops["eps"] != 0.0:
+                                q1_eps_val = q1_mops["eps"]
+                                single_eps = round(cum_eps - q1_eps_val, 2)
+                                # 同步補齊缺漏的 Q1 至圖表
+                                if q1_name not in result["quarters"]:
+                                    result["quarters"].append(q1_name)
+                                    result["eps"].append(q1_eps_val)
+                                    q1_r = q1_mops.get("operating_revenue", 0.0) * 1000.0 if q1_mops.get("operating_revenue", 0.0) < 1e11 else q1_mops.get("operating_revenue", 0.0)
+                                    q1_n = q1_mops.get("net_income", 0.0) * 1000.0 if q1_mops.get("net_income", 0.0) < 1e11 else q1_mops.get("net_income", 0.0)
+                                    result["revenue"].append(q1_r)
+                                    result["net_income"].append(q1_n)
+                                    result["gross_profit"].append(None)
+                                    result["operating_income"].append(None)
+                                    result["gross_margin"].append(None)
+                                    result["operating_margin"].append(None)
+                                    result["net_margin"].append(round(q1_n / q1_r * 100, 2) if q1_r > 0 else 0.0)
+                            else:
+                                single_eps = cum_eps # 極端備援
+                    
+                    # 計算單季營收與淨利
+                    single_rev_val = eps_item.get("single_revenue")
+                    if single_rev_val is None or single_rev_val <= 0:
+                        single_rev_val = float(eps_item.get("operating_revenue", 0.0))
+                    official_rev = single_rev_val * 1000.0 if single_rev_val < 1e11 else single_rev_val
+                    
+                    single_ni_val = eps_item.get("single_net_income")
+                    if single_ni_val is None or single_ni_val == 0:
+                        single_ni_val = float(eps_item.get("net_income", 0.0))
+                    official_ni = single_ni_val * 1000.0 if single_ni_val < 1e11 else single_ni_val
+                    
+                    official_gm = float(eps_item["gross_margin"]) if (eps_item.get("gross_margin") is not None and not is_finance) else None
+                    official_om = float(eps_item["operating_margin"]) if (eps_item.get("operating_margin") is not None and not is_finance) else None
+                    official_nm = round((official_ni / official_rev * 100), 2) if official_rev > 0 else float(eps_item.get("net_margin", 0.0))
+                    
+                    raw_gp = eps_item.get("gross_profit")
+                    official_gp = float(raw_gp) * 1000.0 if (raw_gp is not None and not is_finance) else None
+                    raw_oi = eps_item.get("operating_income")
+                    official_oi = float(raw_oi) * 1000.0 if (raw_oi is not None and not is_finance) else None
+                    
                     result["quarters"].append(official_q)
-                    result["eps"].append(official_eps)
+                    result["eps"].append(single_eps)
                     result["revenue"].append(official_rev)
                     result["net_income"].append(official_ni)
                     result["gross_profit"].append(official_gp)
@@ -1047,20 +1266,14 @@ def fetch_stock_quarterly_history(ticker):
                     result["gross_margin"].append(official_gm)
                     result["operating_margin"].append(official_om)
                     result["net_margin"].append(official_nm)
-                else:
-                    idx = result["quarters"].index(official_q)
-                    if official_eps != 0.0 or result["eps"][idx] == 0.0:
-                        result["eps"][idx] = official_eps
-                    if official_rev != 0.0:
-                        result["revenue"][idx] = official_rev
-                    if official_ni != 0.0:
-                        result["net_income"][idx] = official_ni
-                    if official_gm != 0.0:
-                        result["gross_margin"][idx] = official_gm
-                    if official_om != 0.0:
-                        result["operating_margin"][idx] = official_om
-                    if official_nm != 0.0:
-                        result["net_margin"][idx] = official_nm
+                    result["latest_single_eps"] = single_eps
+        
+        # 若 latest_single_eps 尚未賦值，以最新季度為準
+        if "latest_single_eps" not in result or result["latest_single_eps"] is None:
+            if result["eps"] and len(result["eps"]) > 0:
+                result["latest_single_eps"] = result["eps"][-1]
+            else:
+                result["latest_single_eps"] = result.get("cum_eps", 0.0)
 
         # 保持最新 8 季
         if len(result["quarters"]) > 8:
@@ -1152,18 +1365,27 @@ def get_single_stock_fundamental_data(
 
     month_display = f"{data_month[:3]}/{data_month[3:]}" if len(data_month) == 5 else (data_month or "N/A")
 
+    # 判定是否金融業 (金控、銀行、證券、保險)
+    is_finance = (
+        raw_code.startswith("28") or 
+        raw_code in ["5880", "5876", "6005", "5871", "6024", "6015", "6016"] or 
+        any(k in name for k in ["金控", "銀行", "證券", "期貨", "保險"])
+    )
+
     # 財報三率
     ratio_info = all_ratios.get(raw_code, {})
-    gross_margin = ratio_info.get('gross_margin', 0.0)
-    operating_margin = ratio_info.get('operating_margin', 0.0)
-    pre_tax_margin = ratio_info.get('pre_tax_margin', 0.0)
+    gross_margin = ratio_info.get('gross_margin', None)
+    operating_margin = ratio_info.get('operating_margin', None)
+    pre_tax_margin = ratio_info.get('pre_tax_margin', None)
     net_margin = ratio_info.get('net_margin', 0.0)
     ratio_quarter = f"{ratio_info.get('year', '')}Q{ratio_info.get('quarter', '')}" if ratio_info.get('year') else ""
 
-    # EPS 數據
+    # EPS 數據 (精確區分純單季 EPS 與本年累計每股盈餘)
     eps_info = all_eps.get(raw_code, {})
-    eps = eps_info.get('eps', 0.0)
-    op_income = eps_info.get('operating_income', 0.0)
+    cum_eps = eps_info.get('cum_eps', eps_info.get('eps', 0.0))
+    cum_label = eps_info.get('cum_label', '上半年累計')
+    single_eps = eps_info.get('single_eps')
+    op_income = eps_info.get('operating_income', None)
     net_income = eps_info.get('net_income', 0.0)
     eps_quarter = f"{eps_info.get('year', '')}Q{eps_info.get('quarter', '')}" if eps_info.get('year') else ""
 
@@ -1174,32 +1396,48 @@ def get_single_stock_fundamental_data(
     pb_ratio = val_info.get('pb_ratio')
     div_per_share = val_info.get('dividend_per_share')
 
-    # 補強 1：TPEx 上櫃股三率在 eps_info 中已先預算
-    if gross_margin == 0.0 and eps_info.get('gross_margin', 0.0) > 0:
-        gross_margin = eps_info.get('gross_margin', 0.0)
-    if operating_margin == 0.0 and eps_info.get('operating_margin', 0.0) != 0:
-        operating_margin = eps_info.get('operating_margin', 0.0)
-    if net_margin == 0.0 and eps_info.get('net_margin', 0.0) != 0:
-        net_margin = eps_info.get('net_margin', 0.0)
+    if is_finance:
+        gross_margin = None
+        operating_margin = None
+        op_income = None
+        if (net_margin == 0.0 or net_margin is None) and eps_info.get('net_margin') is not None:
+            net_margin = eps_info.get('net_margin')
+    else:
+        # 補強 1：TPEx 上櫃股三率在 eps_info 中已先預算
+        if (gross_margin is None or gross_margin == 0.0) and eps_info.get('gross_margin') is not None:
+            gross_margin = eps_info.get('gross_margin')
+        if (operating_margin is None or operating_margin == 0.0) and eps_info.get('operating_margin') is not None:
+            operating_margin = eps_info.get('operating_margin')
+        if (net_margin == 0.0 or net_margin is None) and eps_info.get('net_margin') is not None:
+            net_margin = eps_info.get('net_margin')
 
     # 補強 2：若三率/EPS 為 0 或為非台股/KY股，調用 yfinance
     final_quarter = ratio_quarter or eps_quarter
     price = current_price
-    if gross_margin == 0.0 or eps == 0.0 or not final_quarter or div_yield is None or pe_ratio is None or price <= 0.0:
+    need_yf = (not is_finance and (gross_margin is None or gross_margin == 0.0)) or (single_eps is None or single_eps == 0.0) or not final_quarter or div_yield is None or pe_ratio is None or price <= 0.0
+    if need_yf:
         try:
             q_hist = fetch_stock_quarterly_history(t)
             if q_hist and q_hist.get("quarters") and len(q_hist["quarters"]) > 0:
                 latest_q = q_hist["quarters"][-1]
                 if not final_quarter:
                     final_quarter = latest_q
-                if gross_margin == 0.0 and q_hist.get("gross_margin") and len(q_hist["gross_margin"]) > 0:
-                    gross_margin = q_hist["gross_margin"][-1]
-                if operating_margin == 0.0 and q_hist.get("operating_margin") and len(q_hist["operating_margin"]) > 0:
-                    operating_margin = q_hist["operating_margin"][-1]
-                if net_margin == 0.0 and q_hist.get("net_margin") and len(q_hist["net_margin"]) > 0:
+                if not is_finance:
+                    if (gross_margin is None or gross_margin == 0.0) and q_hist.get("gross_margin") and len(q_hist["gross_margin"]) > 0:
+                        gross_margin = q_hist["gross_margin"][-1]
+                    if (operating_margin is None or operating_margin == 0.0) and q_hist.get("operating_margin") and len(q_hist["operating_margin"]) > 0:
+                        operating_margin = q_hist["operating_margin"][-1]
+                if (net_margin == 0.0 or net_margin is None) and q_hist.get("net_margin") and len(q_hist["net_margin"]) > 0:
                     net_margin = q_hist["net_margin"][-1]
-                if eps == 0.0 and q_hist.get("eps") and len(q_hist["eps"]) > 0:
-                    eps = q_hist["eps"][-1]
+                if single_eps is None or single_eps == 0.0:
+                    if q_hist.get("latest_single_eps") is not None:
+                        single_eps = q_hist["latest_single_eps"]
+                    elif q_hist.get("eps") and len(q_hist["eps"]) > 0:
+                        single_eps = q_hist["eps"][-1]
+                if (cum_eps == 0.0 or cum_eps is None) and q_hist.get("cum_eps"):
+                    cum_eps = q_hist["cum_eps"]
+                if not cum_label and q_hist.get("cum_label"):
+                    cum_label = q_hist["cum_label"]
             if div_yield is None and q_hist.get('dividend_yield') is not None:
                 div_yield = q_hist['dividend_yield']
             if pe_ratio is None and q_hist.get('pe_ratio') is not None:
@@ -1208,6 +1446,13 @@ def get_single_stock_fundamental_data(
                 pb_ratio = q_hist['pb_ratio']
         except Exception:
             pass
+
+    # 若 single_eps 仍為 None，最後防線以 cum_eps 備援
+    if single_eps is None:
+        single_eps = cum_eps
+    if cum_eps == 0.0 or cum_eps is None:
+        cum_eps = single_eps
+
 
     # 若市價仍為 0，嘗試透過 yfinance 獲取最新市價
     if price <= 0.0:
@@ -1244,14 +1489,9 @@ def get_single_stock_fundamental_data(
 
     # 標籤判定
     tags = []
-    is_finance = (
-        raw_code.startswith("28") or 
-        raw_code in ["5880", "5876", "6005", "5871", "6024", "6015", "6016"] or 
-        any(k in name for k in ["金控", "銀行", "證券", "期貨", "保險"])
-    )
     if is_finance:
         tags.append("🏦 金控銀行")
-        if net_margin >= 25.0:
+        if net_margin and net_margin >= 25.0:
             tags.append("🌟 獲利績優")
     if mom > 0 and yoy > 0:
         tags.append("📈 營收雙增")
@@ -1262,9 +1502,9 @@ def get_single_stock_fundamental_data(
     elif yoy < -10.0:
         tags.append("⚠️ 年減>10%")
     
-    if gross_margin >= 30.0:
+    if gross_margin is not None and gross_margin >= 30.0:
         tags.append("💎 高毛利")
-    if gross_margin > 0 and operating_margin > 0 and net_margin > 0:
+    if gross_margin is not None and operating_margin is not None and gross_margin > 0 and operating_margin > 0 and net_margin > 0:
         if operating_margin > 15.0 and "🌟 獲利績優" not in tags:
             tags.append("🌟 獲利績優")
 
@@ -1272,9 +1512,9 @@ def get_single_stock_fundamental_data(
         tags.append("💰 高殖利率")
 
     if not is_finance:
-        if yoy < 0 and gross_margin >= 25.0:
+        if gross_margin is not None and yoy < 0 and gross_margin >= 25.0:
             tags.append("🔄 營收降毛利高")
-        elif yoy > 0 and gross_margin < 20.0:
+        elif gross_margin is not None and yoy > 0 and gross_margin < 20.0:
             tags.append("⚡ 營收增毛利低")
 
     return {
@@ -1296,7 +1536,9 @@ def get_single_stock_fundamental_data(
         "營業利益率(%)": operating_margin,
         "稅前純益率(%)": pre_tax_margin,
         "稅後淨利率(%)": net_margin,
-        "最新單季EPS(元)": eps,
+        "最新單季EPS(元)": single_eps,
+        "累計每股盈餘(元)": cum_eps,
+        "累計獲利期間": cum_label or "上半年累計",
         "稅後淨利(千元)": net_income / 1000.0 if net_income else 0.0,
         "殖利率(%)": div_yield if div_yield is not None else 0.0,
         "每股股利(元)": div_per_share,
@@ -3138,7 +3380,7 @@ if hist_close is not None and not hist_close.empty:
             both_growth_weight = fund_df[(fund_df['營收月增(MoM%)'] > 0) & (fund_df['營收年增(YoY%)'] > 0)]['投組權重(%)'].sum()
             
             yoy_boom_df = fund_df[fund_df['營收年增(YoY%)'] >= 20.0]
-            high_margin_df = fund_df[fund_df['毛利率(%)'] >= 30.0]
+            high_margin_df = fund_df[fund_df['毛利率(%)'].fillna(0) >= 30.0]
             high_yield_df = fund_df[fund_df['殖利率(%)'] >= 4.0]
             yoy_decay_df = fund_df[fund_df['營收年增(YoY%)'] <= -10.0]
 
@@ -3205,13 +3447,13 @@ if hist_close is not None and not hist_close.empty:
             elif filter_option == "🔥 營收年增雙位數 (YoY≥10%)":
                 display_df = display_df[display_df['營收年增(YoY%)'] >= 10.0]
             elif filter_option == "💎 高毛利股 (毛利≥30%)":
-                display_df = display_df[display_df['毛利率(%)'] >= 30.0]
+                display_df = display_df[display_df['毛利率(%)'].fillna(0) >= 30.0]
             elif filter_option == "💰 高殖利率股 (殖利率≥4%)":
                 display_df = display_df[display_df['殖利率(%)'] >= 4.0]
             elif filter_option == "🔄 營收降但毛利高 (YoY<0 且 毛利≥25%)":
-                display_df = display_df[(display_df['營收年增(YoY%)'] < 0.0) & (display_df['毛利率(%)'] >= 25.0)]
+                display_df = display_df[(display_df['營收年增(YoY%)'] < 0.0) & (display_df['毛利率(%)'].fillna(0) >= 25.0)]
             elif filter_option == "⚡ 營收增但毛利低 (YoY>0 且 毛利<20%)":
-                display_df = display_df[(display_df['營收年增(YoY%)'] > 0.0) & (display_df['毛利率(%)'] < 20.0)]
+                display_df = display_df[(display_df['營收年增(YoY%)'] > 0.0) & (display_df['毛利率(%)'].notna()) & (display_df['毛利率(%)'] < 20.0)]
             elif filter_option == "⚠️ 營收衰退警戒 (YoY<0%)":
                 display_df = display_df[display_df['營收年增(YoY%)'] < 0.0]
 
@@ -3219,7 +3461,7 @@ if hist_close is not None and not hist_close.empty:
             show_cols = [
                 "股票名稱", "Code", "最新市價", "持股市值", "投組權重(%)",
                 "營收月份", "當月營收(千元)", "營收月增(MoM%)", "營收年增(YoY%)", "累計年增(%)",
-                "財報季度", "毛利率(%)", "營業利益率(%)", "稅後淨利率(%)", "最新單季EPS(元)",
+                "財報季度", "毛利率(%)", "營業利益率(%)", "稅後淨利率(%)", "最新單季EPS(元)", "累計每股盈餘(元)",
                 "殖利率(%)", "本益比(PE)", "股價淨值比(PB)",
                 "標籤"
             ]
@@ -3232,7 +3474,7 @@ if hist_close is not None and not hist_close.empty:
 
             # 美化表格樣式
             def _color_positive_green_negative_red(val):
-                if isinstance(val, (int, float)):
+                if isinstance(val, (int, float)) and pd.notna(val):
                     if val > 0:
                         return "color: #10b981; font-weight: bold;"
                     elif val < 0:
@@ -3247,14 +3489,15 @@ if hist_close is not None and not hist_close.empty:
                 "營收月增(MoM%)": "{:+.2f}%",
                 "營收年增(YoY%)": "{:+.2f}%",
                 "累計年增(%)": "{:+.2f}%",
-                "毛利率(%)": "{:.2f}%",
-                "營業利益率(%)": "{:.2f}%",
-                "稅後淨利率(%)": "{:.2f}%",
+                "毛利率(%)": lambda x: f"{x:.2f}%" if pd.notna(x) else "不適用(金融)",
+                "營業利益率(%)": lambda x: f"{x:+.2f}%" if pd.notna(x) else "不適用(金融)",
+                "稅後淨利率(%)": "{:+.2f}%",
                 "最新單季EPS(元)": "{:+.2f}",
+                "累計每股盈餘(元)": lambda x: f"{x:+.2f}" if (pd.notna(x) and x != 0) else "--",
                 "殖利率(%)": lambda x: f"{x:.2f}%" if pd.notna(x) and x > 0 else ("0.00%" if pd.notna(x) and x == 0 else "N/A"),
                 "本益比(PE)": lambda x: f"{x:.1f}" if pd.notna(x) and x > 0 else "N/A",
                 "股價淨值比(PB)": lambda x: f"{x:.2f}" if pd.notna(x) and x > 0 else "N/A",
-            }).map(_color_positive_green_negative_red, subset=["營收月增(MoM%)", "營收年增(YoY%)", "累計年增(%)", "營業利益率(%)", "稅後淨利率(%)", "最新單季EPS(元)"])
+            }).map(_color_positive_green_negative_red, subset=["營收月增(MoM%)", "營收年增(YoY%)", "累計年增(%)", "營業利益率(%)", "稅後淨利率(%)", "最新單季EPS(元)", "累計每股盈餘(元)"])
 
             st.dataframe(styled_table, use_container_width=True, height=min(450, 40 + len(table_to_format) * 35))
         else:
@@ -3394,11 +3637,14 @@ if hist_close is not None and not hist_close.empty:
                     value_color=card1_color
                 )
             with d_col2:
-                if selected_row.get('是否金融業') or (selected_row['毛利率(%)'] == 0.0 and selected_row['稅後淨利率(%)'] > 0):
+                is_fin_card = selected_row.get('是否金融業', False) or pd.isna(selected_row.get('毛利率(%)')) or pd.isna(selected_row.get('營業利益率(%)'))
+                if is_fin_card:
+                    net_inc_val = selected_row.get('稅後淨利(千元)', 0.0)
+                    net_inc_str = f" | 淨利: {net_inc_val / 1e5:.1f}億" if (net_inc_val and net_inc_val > 0) else ""
                     render_metric_card(
-                        f"📊 獲利能力指標 ({selected_row['財報季度'] or '最新'})",
+                        f"📊 金控核心獲利率 ({selected_row['財報季度'] or '最新'})",
                         f"淨利率 {selected_row['稅後淨利率(%)']:.1f}%",
-                        f"營益率: {selected_row['營業利益率(%)']:.1f}% | 毛利率: 不適用(金融業)",
+                        f"毛利與營益: 不適用 (金控會計無此科目){net_inc_str}",
                         value_color="#10b981" if selected_row['稅後淨利率(%)'] >= 20.0 else "#3b82f6"
                     )
                 else:
@@ -3432,10 +3678,15 @@ if hist_close is not None and not hist_close.empty:
                 dps_val = selected_row.get('每股股利(元)')
                 dps_str = f" | 每股配息 {dps_val:.2f}元" if pd.notna(dps_val) and dps_val > 0 else ""
                 roe_str = f"{q_hist['roe']:.1f}%" if q_hist.get('roe') is not None else "N/A"
+                
+                cum_eps_val = selected_row.get('累計每股盈餘(元)')
+                cum_lbl = selected_row.get('累計獲利期間', '累計')
+                cum_str = f" | {cum_lbl}: {cum_eps_val:+.2f}元" if pd.notna(cum_eps_val) and cum_eps_val != 0 else ""
+                
                 render_metric_card(
-                    "🌱 股利殖利率與 ROE",
-                    f"殖利率: {dy_str}",
-                    f"ROE: {roe_str}{dps_str} | EPS: {selected_row['最新單季EPS(元)']:+.2f}元",
+                    "🌱 股利殖利率與獲利指標 (EPS)",
+                    f"殖利率: {dy_str} | 單季 EPS: {selected_row['最新單季EPS(元)']:+.2f}元",
+                    f"ROE: {roe_str}{dps_str}{cum_str}",
                     value_color="#10b981" if (pd.notna(dy_val) and dy_val >= 4.0) else "#f59e0b"
                 )
 
@@ -3516,40 +3767,46 @@ if hist_close is not None and not hist_close.empty:
             with chart_tab2:
                 if q_hist["quarters"] and len(q_hist["quarters"]) >= 2:
                     fig_ratios = go.Figure()
-                    has_gm = any(v > 0 for v in q_hist["gross_margin"])
+                    is_fin_target = selected_row.get('是否金融業', False) or pd.isna(selected_row.get('毛利率(%)')) or pd.isna(selected_row.get('營業利益率(%)'))
+                    
+                    has_gm = any(v is not None and v > 0 for v in q_hist["gross_margin"]) and not is_fin_target
+                    has_om = any(v is not None and v > 0 for v in q_hist["operating_margin"]) and not is_fin_target
+                    
                     if has_gm:
                         fig_ratios.add_trace(go.Scatter(
                             x=q_hist["quarters"],
                             y=q_hist["gross_margin"],
                             name="毛利率 (%)",
                             mode="lines+markers+text",
-                            text=[f"{v:.1f}%" for v in q_hist["gross_margin"]],
+                            text=[f"{v:.1f}%" if v is not None else "" for v in q_hist["gross_margin"]],
                             textposition="top center",
                             line=dict(color="#3b82f6", width=3),
                             marker=dict(size=7)
                         ))
-                    fig_ratios.add_trace(go.Scatter(
-                        x=q_hist["quarters"],
-                        y=q_hist["operating_margin"],
-                        name="營業利益率 (%)",
-                        mode="lines+markers+text",
-                        text=[f"{v:.1f}%" for v in q_hist["operating_margin"]],
-                        textposition="top center" if not has_gm else "bottom center",
-                        line=dict(color="#10b981", width=2.5),
-                        marker=dict(size=6)
-                    ))
+                    if has_om:
+                        fig_ratios.add_trace(go.Scatter(
+                            x=q_hist["quarters"],
+                            y=q_hist["operating_margin"],
+                            name="營業利益率 (%)",
+                            mode="lines+markers+text",
+                            text=[f"{v:.1f}%" if v is not None else "" for v in q_hist["operating_margin"]],
+                            textposition="bottom center" if has_gm else "top center",
+                            line=dict(color="#10b981", width=2.5),
+                            marker=dict(size=6)
+                        ))
                     fig_ratios.add_trace(go.Scatter(
                         x=q_hist["quarters"],
                         y=q_hist["net_margin"],
                         name="稅後淨利率 (%)",
                         mode="lines+markers+text",
-                        text=[f"{v:.1f}%" for v in q_hist["net_margin"]],
-                        textposition="bottom center",
-                        line=dict(color="#ec4899", width=2.5, dash="dash"),
-                        marker=dict(size=6)
+                        text=[f"{v:.1f}%" if v is not None else "" for v in q_hist["net_margin"]],
+                        textposition="top center" if is_fin_target else "bottom center",
+                        line=dict(color="#ec4899", width=3 if is_fin_target else 2.5, dash="solid" if is_fin_target else "dash"),
+                        marker=dict(size=8 if is_fin_target else 6)
                     ))
+                    chart_title = f"📊 {selected_name} ({selected_code}) 跨季度獲利利潤率走勢 (稅後淨利率)" if is_fin_target else f"📊 {selected_name} ({selected_code}) 跨季度獲利利潤率走勢"
                     fig_ratios.update_layout(
-                        title=f"📊 {selected_name} ({selected_code}) 跨季度獲利利潤率走勢",
+                        title=chart_title,
                         xaxis=dict(title="季度"),
                         yaxis=dict(title="百分比 (%)", zeroline=True),
                         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
@@ -3557,10 +3814,13 @@ if hist_close is not None and not hist_close.empty:
                         margin=dict(l=40, r=40, t=60, b=40)
                     )
                     st.plotly_chart(fig_ratios, use_container_width=True)
-                    if not has_gm:
-                        st.caption("ℹ️ **行業指標提示**：金融控股與銀行業依 IFRS 會計準則不編列營業毛利科目，獲利核心請觀察「營業利益率」、「稅後淨利率」與「ROE」。")
+                    if is_fin_target:
+                        st.caption("ℹ️ **行業會計準則提示**：依《金融控股公司財務報告編製準則》，金控與銀行業因行業特性（主要收益為利息淨收益、手續費收入與投資收益），依法**不編列營業毛利與營業利益科目**（證交所官方填報標註為 `--` 不適用，並非 0 元）。金控獲利核心品質請以「稅後淨利率」與「ROE」為主要觀察基準。")
                 else:
-                    st.info(f"💡 {selected_name} 目前官方申報最新季度 ({selected_row['財報季度'] or '最新'})：毛利率 **{selected_row['毛利率(%)']:.2f}%** | 營業利益率 **{selected_row['營業利益率(%)']:.2f}%** | 稅後淨利率 **{selected_row['稅後淨利率(%)']:.2f}%**。")
+                    if selected_row.get('是否金融業'):
+                        st.info(f"💡 {selected_name} 最新申報季度 ({selected_row['財報季度'] or '最新'})：稅後淨利率達 **{selected_row['稅後淨利率(%)']:.2f}%**（金控會計無毛利與營業利益科目）。")
+                    else:
+                        st.info(f"💡 {selected_name} 目前官方申報最新季度 ({selected_row['財報季度'] or '最新'})：毛利率 **{selected_row.get('毛利率(%)') or 0:.2f}%** | 營業利益率 **{selected_row.get('營業利益率(%)') or 0:.2f}%** | 稅後淨利率 **{selected_row['稅後淨利率(%)']:.2f}%**。")
 
             # ── 圖表 3：單季 EPS 與獲利結構圖 ──
             with chart_tab3:
@@ -3579,36 +3839,48 @@ if hist_close is not None and not hist_close.empty:
                     fig_eps.add_trace(go.Scatter(
                         x=q_hist["quarters"],
                         y=[v / 1e6 for v in q_hist["net_income"]], # 百萬元
-                        name="稅後淨利 (百萬元)",
+                        name="單季稅後淨利 (百萬元)",
                         mode="lines+markers",
                         line=dict(color="#f59e0b", width=2.5),
                         marker=dict(size=6),
                         yaxis="y2"
                     ))
                     fig_eps.update_layout(
-                        title=f"💵 {selected_name} ({selected_code}) 季度 EPS 與獲利走勢",
+                        title=f"💵 {selected_name} ({selected_code}) 歷季單季 EPS 與獲利走勢 (純單季數值)",
                         xaxis=dict(title="季度"),
-                        yaxis=dict(title="每股盈餘 (元)", side="left"),
-                        yaxis2=dict(title="稅後淨利 (百萬元)", side="right", overlaying="y", showgrid=False),
+                        yaxis=dict(title="單季每股盈餘 (元)", side="left"),
+                        yaxis2=dict(title="單季稅後淨利 (百萬元)", side="right", overlaying="y", showgrid=False),
                         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
                         height=420,
                         margin=dict(l=40, r=40, t=60, b=40)
                     )
                     st.plotly_chart(fig_eps, use_container_width=True)
+                    
+                    cum_period_txt = selected_row.get('累計獲利期間', '累計')
+                    cum_eps_disp = selected_row.get('累計每股盈餘(元)')
+                    cum_info = f"；**{cum_period_txt}每股盈餘為 {cum_eps_disp:+.2f} 元**" if pd.notna(cum_eps_disp) and cum_eps_disp != 0 else ""
+                    st.caption(f"ℹ️ **財務走勢統計口徑提示**：本走勢圖柱狀圖與折線嚴格遵循會計準則**純「單季每股盈餘 (Discrete Single-Quarter EPS)」**呈報，絕非半年報或前三季累積數字{cum_info}。系統透過跨期會計差額推導模型自動將官方累計申報精準拆解為純單季，確保跨季連續性與成長動能真實可比。")
                 else:
-                    st.info(f"💡 {selected_name} 最新單季基本每股盈餘 (EPS)：**{selected_row['最新單季EPS(元)']:+.2f} 元**。")
+                    cum_period_txt = selected_row.get('累計獲利期間', '累計')
+                    cum_eps_disp = selected_row.get('累計每股盈餘(元)')
+                    cum_str = f"（{cum_period_txt}：**{cum_eps_disp:+.2f} 元**）" if pd.notna(cum_eps_disp) and cum_eps_disp != 0 else ""
+                    st.info(f"💡 {selected_name} 最新單季基本每股盈餘 (EPS)：**{selected_row['最新單季EPS(元)']:+.2f} 元** {cum_str}。")
 
             # 個股體檢診斷筆記 (包含營收與毛利率剪刀差關係評析)
             with st.expander(f"📝 【{selected_name} ({selected_code})】 基本面體檢與診斷筆記", expanded=True):
                 diag_mom_text = "月增成長" if selected_row['營收月增(MoM%)'] > 0 else "月增衰退"
                 diag_yoy_text = "年增成長" if selected_row['營收年增(YoY%)'] > 0 else "年增衰退"
                 
-                is_fin_target = selected_row.get('是否金融業', False) or (selected_row['毛利率(%)'] == 0.0 and selected_row['稅後淨利率(%)'] > 0)
+                cum_period_txt = selected_row.get('累計獲利期間', '累計')
+                cum_eps_disp = selected_row.get('累計每股盈餘(元)')
+                cum_eps_note = f"，{cum_period_txt}累計達 **{cum_eps_disp:+.2f} 元**" if pd.notna(cum_eps_disp) and cum_eps_disp != 0 else ""
+
+                is_fin_target = selected_row.get('是否金融業', False) or pd.isna(selected_row.get('毛利率(%)')) or pd.isna(selected_row.get('營業利益率(%)'))
                 
                 if is_fin_target:
                     nm_val = selected_row['稅後淨利率(%)']
                     if nm_val >= 35.0:
-                        scissor_diag = f"🏦 **【金控優質獲利引擎】** 稅後淨利率高達 **{nm_val:.2f}%**，獲利含金量極高！金融金控業依會計準則不適用一般製造業毛利率指標，其核心動能來自利息淨收益、手續費收入成長與穩健的資產品質（逾放比低、備抵呆帳覆蓋率足），展現強韌的資本報酬實力。"
+                        scissor_diag = f"🏦 **【金控優質獲利引擎】** 稅後淨利率高達 **{nm_val:.2f}%**，獲利含金量極高！金融金控業依會計準則不編列一般製造業之營業毛利與營業利益科目（證交所官方填報標註為 `--` 不適用），其核心獲利動能來自利息淨收益、手續費收入成長與穩健的資產品質（逾放比低、備抵呆帳覆蓋率足），展現強韌的資本報酬實力。"
                     elif nm_val >= 20.0:
                         scissor_diag = f"🏦 **【金控獲利體質健全】** 稅後淨利率達 **{nm_val:.2f}%**，本業獲利維持穩健。金融業營運聚焦在淨利息收益率(NIM)、手續費動能及投資損益評價，目前獲利結構處於良好水準。"
                     elif nm_val > 0.0:
@@ -3619,19 +3891,20 @@ if hist_close is not None and not hist_close.empty:
                     st.markdown(f"""
                     - **營收動能評等**：當月淨收益/營收呈現 **{diag_mom_text} ({selected_row['營收月增(MoM%)']:+.2f}%)** 與 **{diag_yoy_text} ({selected_row['營收年增(YoY%)']:+.2f}%)**。累計年增率為 **{selected_row['累計年增(%)']:+.2f}%**。
                     - **金融獲利體質診斷**：{scissor_diag}
-                    - **核心利潤率檢驗**：最新單季稅後淨利率高達 **{selected_row['稅後淨利率(%)']:.2f}%**，營業利益率為 **{selected_row['營業利益率(%)']:.2f}%**（會計準則無毛利科目）。
+                    - **核心利潤率檢驗**：最新單季稅後淨利率高達 **{selected_row['稅後淨利率(%)']:.2f}%**（會計準則無營業毛利與營業利益科目，證交所填報 `--` 不適用）。
+                    - **每股盈餘獲利動能 (EPS)**：最新單季基本每股盈餘為 **{selected_row['最新單季EPS(元)']:+.2f} 元**{cum_eps_note}。
                     - **資本報酬與評價**：目前 ROE 約 **{roe_str}**，本益比約 **{pe_str}**，股價淨值比約 **{pb_str}**。
                     """)
                 else:
-                    diag_margin_text = "毛利率高於 30%，具備強大產品競爭力/護城河" if selected_row['毛利率(%)'] >= 30.0 else ("毛利率介於 15%~30%，體質穩健" if selected_row['毛利率(%)'] >= 15.0 else "毛利率低於 15%，屬薄利或成熟競爭市場")
+                    diag_margin_text = "毛利率高於 30%，具備強大產品競爭力/護城河" if (selected_row['毛利率(%)'] and selected_row['毛利率(%)'] >= 30.0) else ("毛利率介於 15%~30%，體質穩健" if (selected_row['毛利率(%)'] and selected_row['毛利率(%)'] >= 15.0) else "毛利率低於 15%，屬薄利或成熟競爭市場")
                     
                     # 剪刀差分析：營收 vs 毛利
                     gm_change = 0.0
-                    if q_hist["quarters"] and len(q_hist["gross_margin"]) >= 2:
+                    if q_hist["quarters"] and len(q_hist["gross_margin"]) >= 2 and q_hist["gross_margin"][-1] is not None and q_hist["gross_margin"][-2] is not None:
                         gm_change = q_hist["gross_margin"][-1] - q_hist["gross_margin"][-2]
                     
                     yoy_val = selected_row['營收年增(YoY%)']
-                    gm_val = selected_row['毛利率(%)']
+                    gm_val = selected_row['毛利率(%)'] or 0.0
                     
                     if yoy_val > 0 and (gm_change > 0 or gm_val >= 25.0):
                         scissor_diag = f"🚀 **【雙引擎擴張】** 營收年增達 **{yoy_val:+.2f}%** 且毛利率維持在 **{gm_val:.2f}%** 高檔（季變動 {gm_change:+.2f}%），顯示產品具備強大市場競爭力與定價話語權，獲利含金量與營收規模同步擴張。"
@@ -3647,5 +3920,6 @@ if hist_close is not None and not hist_close.empty:
                     - **營收與毛利剪刀差診斷**：{scissor_diag}
                     - **本業競爭力與產品毛利**：最新申報毛利率為 **{selected_row['毛利率(%)']:.2f}%**（{diag_margin_text}）。營業利益率為 **{selected_row['營業利益率(%)']:.2f}%**。
                     - **淨利結構檢驗**：稅後淨利率 **{selected_row['稅後淨利率(%)']:.2f}%** 與營業利益率相較，{'業外損益貢獻正面' if selected_row['稅後淨利率(%)'] >= selected_row['營業利益率(%)'] else '業外支出略有侵蝕或所得稅提列'}。
+                    - **每股盈餘獲利動能 (EPS)**：最新單季基本每股盈餘為 **{selected_row['最新單季EPS(元)']:+.2f} 元**{cum_eps_note}。
                     - **評價估值水位**：目前本益比約 **{pe_str}**，股價淨值比約 **{pb_str}**。
                     """)
