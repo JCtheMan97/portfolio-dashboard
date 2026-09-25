@@ -1012,6 +1012,71 @@ def fetch_stock_quarterly_history(ticker):
                 result["net_margin"].append(round(nm, 2))
     except Exception:
         pass
+
+    # 2. 自動結合 TWSE & TPEx 官方 OpenAPI 最新季度財務數據，確保台股圖表與指標同步更新至官方最新季度
+    try:
+        all_eps = fetch_twse_tpex_eps_data()
+        if raw_code in all_eps:
+            eps_item = all_eps[raw_code]
+            tw_year = str(eps_item.get("year", "")).strip()
+            tw_quarter = str(eps_item.get("quarter", "")).strip()
+            if tw_year and tw_quarter:
+                ad_year = int(tw_year) + 1911 if int(tw_year) < 1900 else int(tw_year)
+                official_q = f"{ad_year}Q{tw_quarter}"
+                official_eps = float(eps_item.get("eps", 0.0))
+                # TWSE OpenAPI 損益金額為千元，乘上 1000 轉為元以與 yfinance 單位一致
+                raw_op_rev = float(eps_item.get("operating_revenue", 0.0))
+                official_rev = raw_op_rev * 1000.0 if raw_op_rev < 1e11 else raw_op_rev
+                raw_net = float(eps_item.get("net_income", 0.0))
+                official_ni = raw_net * 1000.0 if raw_net < 1e11 else raw_net
+                raw_gp = float(eps_item.get("gross_profit", 0.0))
+                official_gp = raw_gp * 1000.0 if raw_gp < 1e11 else raw_gp
+                raw_oi = float(eps_item.get("operating_income", 0.0))
+                official_oi = raw_oi * 1000.0 if raw_oi < 1e11 else raw_oi
+                official_gm = float(eps_item.get("gross_margin", 0.0))
+                official_om = float(eps_item.get("operating_margin", 0.0))
+                official_nm = float(eps_item.get("net_margin", 0.0))
+
+                if official_q not in result["quarters"]:
+                    result["quarters"].append(official_q)
+                    result["eps"].append(official_eps)
+                    result["revenue"].append(official_rev)
+                    result["net_income"].append(official_ni)
+                    result["gross_profit"].append(official_gp)
+                    result["operating_income"].append(official_oi)
+                    result["gross_margin"].append(official_gm)
+                    result["operating_margin"].append(official_om)
+                    result["net_margin"].append(official_nm)
+                else:
+                    idx = result["quarters"].index(official_q)
+                    if official_eps != 0.0 or result["eps"][idx] == 0.0:
+                        result["eps"][idx] = official_eps
+                    if official_rev != 0.0:
+                        result["revenue"][idx] = official_rev
+                    if official_ni != 0.0:
+                        result["net_income"][idx] = official_ni
+                    if official_gm != 0.0:
+                        result["gross_margin"][idx] = official_gm
+                    if official_om != 0.0:
+                        result["operating_margin"][idx] = official_om
+                    if official_nm != 0.0:
+                        result["net_margin"][idx] = official_nm
+
+        # 保持最新 8 季
+        if len(result["quarters"]) > 8:
+            keep_n = 8
+            result["quarters"] = result["quarters"][-keep_n:]
+            result["revenue"] = result["revenue"][-keep_n:]
+            result["gross_profit"] = result["gross_profit"][-keep_n:]
+            result["operating_income"] = result["operating_income"][-keep_n:]
+            result["net_income"] = result["net_income"][-keep_n:]
+            result["eps"] = result["eps"][-keep_n:]
+            result["gross_margin"] = result["gross_margin"][-keep_n:]
+            result["operating_margin"] = result["operating_margin"][-keep_n:]
+            result["net_margin"] = result["net_margin"][-keep_n:]
+    except Exception:
+        pass
+
     return result
 
 # ============================================================
@@ -1158,16 +1223,36 @@ def get_single_stock_fundamental_data(
         except Exception:
             price = 0.0
 
-    # 格式化季度顯示
-    if final_quarter.startswith("20") and len(final_quarter) >= 6:
-        try:
-            y_val = int(final_quarter[:4]) - 1911
-            final_quarter = f"{y_val}{final_quarter[4:]}"
-        except Exception:
-            pass
+    # 格式化季度顯示 (例如 2026Q2 (115Q2)，西元與民國雙軌清楚呈現，避免混淆)
+    if final_quarter:
+        fq_clean = str(final_quarter).strip()
+        if fq_clean.startswith("20") and len(fq_clean) >= 6:
+            try:
+                y_val = int(fq_clean[:4]) - 1911
+                final_quarter = f"{fq_clean} ({y_val}{fq_clean[4:]})"
+            except Exception:
+                pass
+        elif ("Q" in fq_clean) and not ("(" in fq_clean):
+            try:
+                prefix = fq_clean.split("Q")[0]
+                q_part = fq_clean.split("Q")[1]
+                if prefix.isdigit() and int(prefix) < 1900:
+                    ad_y = int(prefix) + 1911
+                    final_quarter = f"{ad_y}Q{q_part} ({fq_clean})"
+            except Exception:
+                pass
 
     # 標籤判定
     tags = []
+    is_finance = (
+        raw_code.startswith("28") or 
+        raw_code in ["5880", "5876", "6005", "5871", "6024", "6015", "6016"] or 
+        any(k in name for k in ["金控", "銀行", "證券", "期貨", "保險"])
+    )
+    if is_finance:
+        tags.append("🏦 金控銀行")
+        if net_margin >= 25.0:
+            tags.append("🌟 獲利績優")
     if mom > 0 and yoy > 0:
         tags.append("📈 營收雙增")
     if yoy >= 20.0:
@@ -1180,16 +1265,17 @@ def get_single_stock_fundamental_data(
     if gross_margin >= 30.0:
         tags.append("💎 高毛利")
     if gross_margin > 0 and operating_margin > 0 and net_margin > 0:
-        if operating_margin > 15.0:
+        if operating_margin > 15.0 and "🌟 獲利績優" not in tags:
             tags.append("🌟 獲利績優")
 
     if div_yield is not None and div_yield >= 4.0:
         tags.append("💰 高殖利率")
 
-    if yoy < 0 and gross_margin >= 25.0:
-        tags.append("🔄 營收降毛利高")
-    elif yoy > 0 and gross_margin < 20.0:
-        tags.append("⚡ 營收增毛利低")
+    if not is_finance:
+        if yoy < 0 and gross_margin >= 25.0:
+            tags.append("🔄 營收降毛利高")
+        elif yoy > 0 and gross_margin < 20.0:
+            tags.append("⚡ 營收增毛利低")
 
     return {
         "Ticker": t,
@@ -1217,6 +1303,7 @@ def get_single_stock_fundamental_data(
         "本益比(PE)": pe_ratio,
         "股價淨值比(PB)": pb_ratio,
         "營收備註": note,
+        "是否金融業": is_finance,
         "標籤": " ".join(tags) if tags else "穩健"
     }
 
@@ -3307,12 +3394,20 @@ if hist_close is not None and not hist_close.empty:
                     value_color=card1_color
                 )
             with d_col2:
-                render_metric_card(
-                    f"📊 財報三率 ({selected_row['財報季度'] or '最新'})",
-                    f"毛利 {selected_row['毛利率(%)']:.1f}%",
-                    f"營益率: {selected_row['營業利益率(%)']:.1f}% | 淨利率: {selected_row['稅後淨利率(%)']:.1f}%",
-                    value_color="#3b82f6"
-                )
+                if selected_row.get('是否金融業') or (selected_row['毛利率(%)'] == 0.0 and selected_row['稅後淨利率(%)'] > 0):
+                    render_metric_card(
+                        f"📊 獲利能力指標 ({selected_row['財報季度'] or '最新'})",
+                        f"淨利率 {selected_row['稅後淨利率(%)']:.1f}%",
+                        f"營益率: {selected_row['營業利益率(%)']:.1f}% | 毛利率: 不適用(金融業)",
+                        value_color="#10b981" if selected_row['稅後淨利率(%)'] >= 20.0 else "#3b82f6"
+                    )
+                else:
+                    render_metric_card(
+                        f"📊 財報三率 ({selected_row['財報季度'] or '最新'})",
+                        f"毛利 {selected_row['毛利率(%)']:.1f}%",
+                        f"營益率: {selected_row['營業利益率(%)']:.1f}% | 淨利率: {selected_row['稅後淨利率(%)']:.1f}%",
+                        value_color="#3b82f6"
+                    )
             with d_col3:
                 pe_val = selected_row.get('本益比(PE)')
                 pb_val = selected_row.get('股價淨值比(PB)')
@@ -3421,23 +3516,25 @@ if hist_close is not None and not hist_close.empty:
             with chart_tab2:
                 if q_hist["quarters"] and len(q_hist["quarters"]) >= 2:
                     fig_ratios = go.Figure()
-                    fig_ratios.add_trace(go.Scatter(
-                        x=q_hist["quarters"],
-                        y=q_hist["gross_margin"],
-                        name="毛利率 (%)",
-                        mode="lines+markers+text",
-                        text=[f"{v:.1f}%" for v in q_hist["gross_margin"]],
-                        textposition="top center",
-                        line=dict(color="#3b82f6", width=3),
-                        marker=dict(size=7)
-                    ))
+                    has_gm = any(v > 0 for v in q_hist["gross_margin"])
+                    if has_gm:
+                        fig_ratios.add_trace(go.Scatter(
+                            x=q_hist["quarters"],
+                            y=q_hist["gross_margin"],
+                            name="毛利率 (%)",
+                            mode="lines+markers+text",
+                            text=[f"{v:.1f}%" for v in q_hist["gross_margin"]],
+                            textposition="top center",
+                            line=dict(color="#3b82f6", width=3),
+                            marker=dict(size=7)
+                        ))
                     fig_ratios.add_trace(go.Scatter(
                         x=q_hist["quarters"],
                         y=q_hist["operating_margin"],
                         name="營業利益率 (%)",
                         mode="lines+markers+text",
                         text=[f"{v:.1f}%" for v in q_hist["operating_margin"]],
-                        textposition="bottom center",
+                        textposition="top center" if not has_gm else "bottom center",
                         line=dict(color="#10b981", width=2.5),
                         marker=dict(size=6)
                     ))
@@ -3445,12 +3542,14 @@ if hist_close is not None and not hist_close.empty:
                         x=q_hist["quarters"],
                         y=q_hist["net_margin"],
                         name="稅後淨利率 (%)",
-                        mode="lines+markers",
-                        line=dict(color="#ec4899", width=2, dash="dash"),
-                        marker=dict(size=5)
+                        mode="lines+markers+text",
+                        text=[f"{v:.1f}%" for v in q_hist["net_margin"]],
+                        textposition="bottom center",
+                        line=dict(color="#ec4899", width=2.5, dash="dash"),
+                        marker=dict(size=6)
                     ))
                     fig_ratios.update_layout(
-                        title=f"📊 {selected_name} ({selected_code}) 跨季度財報三率走勢 (毛利率 / 營業利益率 / 稅後淨利率)",
+                        title=f"📊 {selected_name} ({selected_code}) 跨季度獲利利潤率走勢",
                         xaxis=dict(title="季度"),
                         yaxis=dict(title="百分比 (%)", zeroline=True),
                         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
@@ -3458,6 +3557,8 @@ if hist_close is not None and not hist_close.empty:
                         margin=dict(l=40, r=40, t=60, b=40)
                     )
                     st.plotly_chart(fig_ratios, use_container_width=True)
+                    if not has_gm:
+                        st.caption("ℹ️ **行業指標提示**：金融控股與銀行業依 IFRS 會計準則不編列營業毛利科目，獲利核心請觀察「營業利益率」、「稅後淨利率」與「ROE」。")
                 else:
                     st.info(f"💡 {selected_name} 目前官方申報最新季度 ({selected_row['財報季度'] or '最新'})：毛利率 **{selected_row['毛利率(%)']:.2f}%** | 營業利益率 **{selected_row['營業利益率(%)']:.2f}%** | 稅後淨利率 **{selected_row['稅後淨利率(%)']:.2f}%**。")
 
@@ -3501,29 +3602,50 @@ if hist_close is not None and not hist_close.empty:
             with st.expander(f"📝 【{selected_name} ({selected_code})】 基本面體檢與診斷筆記", expanded=True):
                 diag_mom_text = "月增成長" if selected_row['營收月增(MoM%)'] > 0 else "月增衰退"
                 diag_yoy_text = "年增成長" if selected_row['營收年增(YoY%)'] > 0 else "年增衰退"
-                diag_margin_text = "毛利率高於 30%，具備強大產品競爭力/護城河" if selected_row['毛利率(%)'] >= 30.0 else ("毛利率介於 15%~30%，體質穩健" if selected_row['毛利率(%)'] >= 15.0 else "毛利率低於 15%，屬薄利或成熟競爭市場")
                 
-                # 剪刀差分析：營收 vs 毛利
-                gm_change = 0.0
-                if q_hist["quarters"] and len(q_hist["gross_margin"]) >= 2:
-                    gm_change = q_hist["gross_margin"][-1] - q_hist["gross_margin"][-2]
+                is_fin_target = selected_row.get('是否金融業', False) or (selected_row['毛利率(%)'] == 0.0 and selected_row['稅後淨利率(%)'] > 0)
                 
-                yoy_val = selected_row['營收年增(YoY%)']
-                gm_val = selected_row['毛利率(%)']
-                
-                if yoy_val > 0 and (gm_change > 0 or gm_val >= 25.0):
-                    scissor_diag = f"🚀 **【雙引擎擴張】** 營收年增達 **{yoy_val:+.2f}%** 且毛利率維持在 **{gm_val:.2f}%** 高檔（季變動 {gm_change:+.2f}%），顯示產品具備強大市場競爭力與定價話語權，獲利含金量與營收規模同步擴張。"
-                elif yoy_val < 0 and (gm_change > 0 or gm_val >= 25.0):
-                    scissor_diag = f"🔄 **【營收下降但毛利上升 / 結構轉型優化】** 雖然單月營收年減 **{yoy_val:+.2f}%**，但毛利率達 **{gm_val:.2f}%**（季變動 {gm_change:+.2f}%），呈現「營收降、毛利升」之結構優化特徵。通常代表公司正在主動淘汰低毛利代工訂單、聚焦高附加價值利基型產品，或成本轉嫁效益顯現，體質正在轉佳！"
-                elif yoy_val > 0 and (gm_change < 0 or gm_val < 20.0):
-                    scissor_diag = f"⚡ **【營收上升但毛利下降 / 薄利競爭或成本承壓】** 營收年增達 **{yoy_val:+.2f}%** 表現亮眼，但毛利率僅 **{gm_val:.2f}%**（季變動 {gm_change:+.2f}%），呈現「營收升、毛利降」之剪刀差。需特別留意是否受原物料成本上漲、產業進入殺價競爭，或擴大出貨低毛利產品導致「營收虛胖、獲利受壓」之風險。"
-                else:
-                    scissor_diag = f"💀 **【量利齊跌 / 景氣下行警戒】** 營收年減 **{yoy_val:+.2f}%** 且毛利率處於 **{gm_val:.2f}%**（季變動 {gm_change:+.2f}%），面臨需求走弱與利潤率壓縮雙重挑戰，需留意產業景氣落底信號。"
+                if is_fin_target:
+                    nm_val = selected_row['稅後淨利率(%)']
+                    if nm_val >= 35.0:
+                        scissor_diag = f"🏦 **【金控優質獲利引擎】** 稅後淨利率高達 **{nm_val:.2f}%**，獲利含金量極高！金融金控業依會計準則不適用一般製造業毛利率指標，其核心動能來自利息淨收益、手續費收入成長與穩健的資產品質（逾放比低、備抵呆帳覆蓋率足），展現強韌的資本報酬實力。"
+                    elif nm_val >= 20.0:
+                        scissor_diag = f"🏦 **【金控獲利體質健全】** 稅後淨利率達 **{nm_val:.2f}%**，本業獲利維持穩健。金融業營運聚焦在淨利息收益率(NIM)、手續費動能及投資損益評價，目前獲利結構處於良好水準。"
+                    elif nm_val > 0.0:
+                        scissor_diag = f"🏦 **【金控獲利平穩觀察】** 稅後淨利率為 **{nm_val:.2f}%**，需關注市場降息循環或資本市場波動對投資收益與提存準備金之影響。"
+                    else:
+                        scissor_diag = f"⚠️ **【金控獲利承壓警戒】** 稅後淨利率為 **{nm_val:.2f}%** 轉負或微薄，需檢視是否有重大呆帳提存、投資未實現虧損或一次性費用認列。"
 
-                st.markdown(f"""
-                - **營收動能評等**：當月營收呈現 **{diag_mom_text} ({selected_row['營收月增(MoM%)']:+.2f}%)** 與 **{diag_yoy_text} ({selected_row['營收年增(YoY%)']:+.2f}%)**。累計年增率為 **{selected_row['累計年增(%)']:+.2f}%**。
-                - **營收與毛利剪刀差診斷**：{scissor_diag}
-                - **本業競爭力與產品毛利**：最新申報毛利率為 **{selected_row['毛利率(%)']:.2f}%**（{diag_margin_text}）。營業利益率為 **{selected_row['營業利益率(%)']:.2f}%**。
-                - **淨利結構檢驗**：稅後淨利率 **{selected_row['稅後淨利率(%)']:.2f}%** 與營業利益率相較，{'業外損益貢獻正面' if selected_row['稅後淨利率(%)'] >= selected_row['營業利益率(%)'] else '業外支出略有侵蝕或所得稅提列'}。
-                - **評價估值水位**：目前本益比約 **{pe_str}**，股價淨值比約 **{pb_str}**。
-                """)
+                    st.markdown(f"""
+                    - **營收動能評等**：當月淨收益/營收呈現 **{diag_mom_text} ({selected_row['營收月增(MoM%)']:+.2f}%)** 與 **{diag_yoy_text} ({selected_row['營收年增(YoY%)']:+.2f}%)**。累計年增率為 **{selected_row['累計年增(%)']:+.2f}%**。
+                    - **金融獲利體質診斷**：{scissor_diag}
+                    - **核心利潤率檢驗**：最新單季稅後淨利率高達 **{selected_row['稅後淨利率(%)']:.2f}%**，營業利益率為 **{selected_row['營業利益率(%)']:.2f}%**（會計準則無毛利科目）。
+                    - **資本報酬與評價**：目前 ROE 約 **{roe_str}**，本益比約 **{pe_str}**，股價淨值比約 **{pb_str}**。
+                    """)
+                else:
+                    diag_margin_text = "毛利率高於 30%，具備強大產品競爭力/護城河" if selected_row['毛利率(%)'] >= 30.0 else ("毛利率介於 15%~30%，體質穩健" if selected_row['毛利率(%)'] >= 15.0 else "毛利率低於 15%，屬薄利或成熟競爭市場")
+                    
+                    # 剪刀差分析：營收 vs 毛利
+                    gm_change = 0.0
+                    if q_hist["quarters"] and len(q_hist["gross_margin"]) >= 2:
+                        gm_change = q_hist["gross_margin"][-1] - q_hist["gross_margin"][-2]
+                    
+                    yoy_val = selected_row['營收年增(YoY%)']
+                    gm_val = selected_row['毛利率(%)']
+                    
+                    if yoy_val > 0 and (gm_change > 0 or gm_val >= 25.0):
+                        scissor_diag = f"🚀 **【雙引擎擴張】** 營收年增達 **{yoy_val:+.2f}%** 且毛利率維持在 **{gm_val:.2f}%** 高檔（季變動 {gm_change:+.2f}%），顯示產品具備強大市場競爭力與定價話語權，獲利含金量與營收規模同步擴張。"
+                    elif yoy_val < 0 and (gm_change > 0 or gm_val >= 25.0):
+                        scissor_diag = f"🔄 **【營收下降但毛利上升 / 結構轉型優化】** 雖然單月營收年減 **{yoy_val:+.2f}%**，但毛利率達 **{gm_val:.2f}%**（季變動 {gm_change:+.2f}%），呈現「營收降、毛利升」之結構優化特徵。通常代表公司正在主動淘汰低毛利代工訂單、聚焦高附加價值利基型產品，或成本轉嫁效益顯現，體質正在轉佳！"
+                    elif yoy_val > 0 and (gm_change < 0 or gm_val < 20.0):
+                        scissor_diag = f"⚡ **【營收上升但毛利下降 / 薄利競爭或成本承壓】** 營收年增達 **{yoy_val:+.2f}%** 表現亮眼，但毛利率僅 **{gm_val:.2f}%**（季變動 {gm_change:+.2f}%），呈現「營收升、毛利降」之剪刀差。需特別留意是否受原物料成本上漲、產業進入殺價競爭，或擴大出貨低毛利產品導致「營收虛胖、獲利受壓」之風險。"
+                    else:
+                        scissor_diag = f"💀 **【量利齊跌 / 景氣下行警戒】** 營收年減 **{yoy_val:+.2f}%** 且毛利率處於 **{gm_val:.2f}%**（季變動 {gm_change:+.2f}%），面臨需求走弱與利潤率壓縮雙重挑戰，需留意產業景氣落底信號。"
+
+                    st.markdown(f"""
+                    - **營收動能評等**：當月營收呈現 **{diag_mom_text} ({selected_row['營收月增(MoM%)']:+.2f}%)** 與 **{diag_yoy_text} ({selected_row['營收年增(YoY%)']:+.2f}%)**。累計年增率為 **{selected_row['累計年增(%)']:+.2f}%**。
+                    - **營收與毛利剪刀差診斷**：{scissor_diag}
+                    - **本業競爭力與產品毛利**：最新申報毛利率為 **{selected_row['毛利率(%)']:.2f}%**（{diag_margin_text}）。營業利益率為 **{selected_row['營業利益率(%)']:.2f}%**。
+                    - **淨利結構檢驗**：稅後淨利率 **{selected_row['稅後淨利率(%)']:.2f}%** 與營業利益率相較，{'業外損益貢獻正面' if selected_row['稅後淨利率(%)'] >= selected_row['營業利益率(%)'] else '業外支出略有侵蝕或所得稅提列'}。
+                    - **評價估值水位**：目前本益比約 **{pe_str}**，股價淨值比約 **{pb_str}**。
+                    """)
