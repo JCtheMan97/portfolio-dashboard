@@ -957,13 +957,21 @@ def fetch_stock_monthly_revenue_history(stock_code):
                                 yoy = ((rev - py_rev) / py_rev) * 100
                             break
 
+                    # 計算累計營收 (當年度 1 月至該月份累計)
+                    same_yr_rev = [float(item.get("revenue", 0)) / 1000.0 for item in sorted_data if int(item.get("revenue_year", 0)) == m_year and int(item.get("revenue_month", 0)) <= m_month]
+                    cum_rev = sum(same_yr_rev)
+                    prev_yr_cum_rev = sum([float(item.get("revenue", 0)) / 1000.0 for item in sorted_data if int(item.get("revenue_year", 0)) == m_year - 1 and int(item.get("revenue_month", 0)) <= m_month])
+                    cum_yoy = round(((cum_rev - prev_yr_cum_rev) / prev_yr_cum_rev * 100), 2) if prev_yr_cum_rev > 0 else 0.0
+
                     records.append({
                         "year": m_year,
                         "month": m_month,
                         "date_label": date_label,
                         "revenue": rev / 1000.0, # 轉為千元
-                        "mom": mom,
-                        "yoy": yoy
+                        "mom": round(mom, 2),
+                        "yoy": round(yoy, 2),
+                        "cum_rev": round(cum_rev, 2),
+                        "cum_yoy": round(cum_yoy, 2)
                     })
                 if records:
                     return records
@@ -1012,13 +1020,17 @@ def fetch_stock_monthly_revenue_history(stock_code):
                                 rev_cur = _clean_num(tds[1])
                                 mom_val = _clean_num(tds[4])
                                 yoy_val = _clean_num(tds[5])
+                                cum_rev_val = _clean_num(tds[6]) if len(tds) >= 7 else 0.0
+                                cum_yoy_val = _clean_num(tds[8]) if len(tds) >= 9 else 0.0
                                 records.append({
                                     "year": y + 1911,
                                     "month": m_num,
                                     "date_label": f"{y+1911}/{m_num:02d}",
                                     "revenue": rev_cur,
                                     "mom": mom_val,
-                                    "yoy": yoy_val
+                                    "yoy": yoy_val,
+                                    "cum_rev": cum_rev_val,
+                                    "cum_yoy": cum_yoy_val
                                 })
         except Exception:
             continue
@@ -1027,6 +1039,125 @@ def fetch_stock_monthly_revenue_history(stock_code):
 
 # 保留舊函式名稱相容性
 fetch_mops_stock_monthly_revenue_history = fetch_stock_monthly_revenue_history
+
+
+def sync_latest_monthly_revenue_for_codes(codes, all_monthly_rev):
+    """
+    實時對齊各公司最新公布之月營收：
+    每月 1~10 號各公司陸續在公開資訊觀測站 (MOPS) 與 FinMind 申報最新月份營收（如 9 月），
+    但證交所與櫃買中心官方 OpenData 彙總檔案（t187ap05_L 等）往往延遲至 10~15 號才批次打包切換。
+    本函式以多線程並行查詢，若發現個別標的已有更新月份之營收申報，
+    即時補齊至 all_monthly_rev 資料庫中，確保總表、KPI 卡片、走勢圖與診斷筆記 100% 同步！
+    """
+    if not codes or all_monthly_rev is None:
+        return all_monthly_rev
+
+    unique_codes = list(set([str(c).strip().split('.')[0] for c in codes if str(c).strip().split('.')[0].isdigit()]))
+    if not unique_codes:
+        return all_monthly_rev
+
+    def _sync_one(raw_c):
+        try:
+            cur_info = all_monthly_rev.get(raw_c, {})
+            if cur_info.get("_synced"):
+                return None
+
+            m_hist = fetch_stock_monthly_revenue_history(raw_c)
+            if not m_hist:
+                if raw_c in all_monthly_rev:
+                    all_monthly_rev[raw_c]["_synced"] = True
+                return None
+
+            latest_rec = m_hist[-1]
+            latest_m = latest_rec.get("month", 0)
+            latest_y = latest_rec.get("year", 0)
+
+            data_m = str(cur_info.get("data_month", "")).strip()
+
+            cur_m = 0
+            if len(data_m) >= 5 and data_m[-2:].isdigit():
+                cur_m = int(data_m[-2:])
+
+            # 判斷是否 FinMind / MOPS 已經有更新月份 (例如 latest_m == 9 > cur_m == 8)
+            is_newer = False
+            if cur_m == 0 and latest_m > 0:
+                is_newer = True
+            elif latest_m > cur_m:
+                is_newer = True
+            elif latest_m == 1 and cur_m == 12:
+                is_newer = True
+
+            if is_newer:
+                if len(data_m) == 5 and data_m[:3].isdigit():
+                    roc_y = data_m[:3]
+                else:
+                    roc_y = str(latest_y - 1911 if latest_y > 1911 else 115)
+
+                new_data_month = f"{roc_y}{latest_m:02d}"
+
+                cum_rev = latest_rec.get("cum_rev", 0.0)
+                cum_yoy = latest_rec.get("cum_yoy", 0.0)
+                if cum_rev == 0.0:
+                    same_yr = [r for r in m_hist if r.get("year") == latest_y and r.get("month", 0) <= latest_m]
+                    prev_yr = [r for r in m_hist if r.get("year") == latest_y - 1 and r.get("month", 0) <= latest_m]
+                    if same_yr:
+                        cum_rev = sum(r.get("revenue", 0.0) for r in same_yr)
+                        if prev_yr:
+                            prev_cum = sum(r.get("revenue", 0.0) for r in prev_yr)
+                            if prev_cum > 0:
+                                cum_yoy = round(((cum_rev - prev_cum) / prev_cum) * 100, 2)
+
+                rev_last_m = m_hist[-2].get("revenue", 0.0) if len(m_hist) >= 2 else cur_info.get("rev_last_month", 0.0)
+
+                # 尋找去年同月營收
+                rev_last_y = 0.0
+                for r in m_hist:
+                    if r.get("year") == latest_y - 1 and r.get("month") == latest_m:
+                        rev_last_y = r.get("revenue", 0.0)
+                        break
+                if rev_last_y == 0.0:
+                    rev_last_y = cur_info.get("rev_last_year", 0.0)
+
+                updated_item = {
+                    "code": raw_c,
+                    "name": cur_info.get("name", raw_c),
+                    "data_month": new_data_month,
+                    "rev_current": latest_rec.get("revenue", 0.0), # 千元
+                    "rev_last_month": rev_last_m,
+                    "rev_last_year": rev_last_y,
+                    "mom": latest_rec.get("mom", 0.0),
+                    "yoy": latest_rec.get("yoy", 0.0),
+                    "cum_rev": cum_rev,
+                    "cum_last_year": cur_info.get("cum_last_year", 0.0),
+                    "cum_yoy": cum_yoy,
+                    "note": cur_info.get("note", "") or f"即時同步公開資訊觀測站(MOPS)最新{latest_m}月營收",
+                    "market": cur_info.get("market", ""),
+                    "_synced": True
+                }
+                return (raw_c, updated_item)
+            else:
+                if raw_c in all_monthly_rev:
+                    all_monthly_rev[raw_c]["_synced"] = True
+                return None
+        except Exception:
+            return None
+
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(8, len(unique_codes))) as executor:
+            results = executor.map(_sync_one, unique_codes)
+            for res in results:
+                if res:
+                    code, item = res
+                    all_monthly_rev[code] = item
+    except Exception:
+        for c in unique_codes:
+            res = _sync_one(c)
+            if res:
+                code, item = res
+                all_monthly_rev[code] = item
+
+    return all_monthly_rev
 
 @st.cache_data(ttl=3600)
 def fetch_stock_quarterly_history(ticker):
@@ -1592,7 +1723,10 @@ def get_single_stock_fundamental_data(
         else:
             name = raw_code
 
-    # 營收數據 (來自 TWSE/TPEx OpenAPI)
+    # 營收數據 (來自 TWSE/TPEx OpenAPI，若為台股個股且尚未同步最新申報月份則自動橋接 MOPS)
+    if is_tw_code and all_monthly_rev is not None and not all_monthly_rev.get(raw_code, {}).get("_synced"):
+        sync_latest_monthly_revenue_for_codes([raw_code], all_monthly_rev)
+
     rev_info = all_monthly_rev.get(raw_code, {})
     rev_cur = rev_info.get('rev_current', 0.0) # 千元
     rev_last_m = rev_info.get('rev_last_month', 0.0)
@@ -3590,6 +3724,7 @@ if hist_close is not None and not hist_close.empty:
                 fetch_twse_tpex_financial_ratios.clear()
                 fetch_twse_tpex_eps_data.clear()
                 fetch_twse_tpex_valuation_ratios.clear()
+                fetch_stock_monthly_revenue_history.clear()
                 st.rerun()
 
         # 載入全市場 OpenAPI 數據 (已由 @st.cache_data 快取)
@@ -3598,6 +3733,11 @@ if hist_close is not None and not hist_close.empty:
             all_ratios = fetch_twse_tpex_financial_ratios()
             all_eps = fetch_twse_tpex_eps_data()
             all_valuations = fetch_twse_tpex_valuation_ratios()
+
+            # 實時對齊庫存持股最新月份申報營收 (如公開資訊觀測站已公布 9 月，自動即時補齊升級)
+            if not active_holdings.empty:
+                holding_codes = [r['Ticker'].strip().upper().split('.')[0] for _, r in active_holdings.iterrows() if r['Ticker'].strip().upper().split('.')[0].isdigit()]
+                all_monthly_rev = sync_latest_monthly_revenue_for_codes(holding_codes, all_monthly_rev)
 
         # 整理持股基本面資料框
         fundamental_rows = []
@@ -3749,6 +3889,7 @@ if hist_close is not None and not hist_close.empty:
             }).map(_color_positive_green_negative_red, subset=["營收月增(MoM%)", "營收年增(YoY%)", "累計年增(%)", "營業利益率(%)", "稅後淨利率(%)", "最新單季EPS(元)", "累計每股盈餘(元)"])
 
             st.dataframe(styled_table, use_container_width=True, height=min(450, 40 + len(table_to_format) * 35))
+            st.caption("💡 **資料同步說明**：本表全面支援「**公開資訊觀測站 (MOPS) 即時月營收自動橋接**」。月初 1~10 號各公司陸續申報最新月份營收（如 9 月），即使證交所全市場批次 OpenData 尚未切換，系統亦會自動多線程探測並切換至最新申報月份營收與累計數據。")
         else:
             st.info("💡 目前投資組合尚無庫存持股，故第一部分戰情指標與第二部分庫存總表暫無數據。您仍可使用下方【第三部分】自由檢索全市場台股與美股進行深度基本面分析！")
 
@@ -3871,6 +4012,8 @@ if hist_close is not None and not hist_close.empty:
             d_col1, d_col2, d_col3, d_col4 = st.columns(4)
             with d_col1:
                 cur_rev_val = selected_row.get('當月營收(千元)', 0.0)
+                m_label = selected_row.get('營收月份', '')
+                m_title = f"💰 最新營收動能 ({m_label})" if m_label and m_label != 'N/A' else "💰 最新單月/季度營收動能"
                 if cur_rev_val > 0:
                     card1_val = f"{cur_rev_val / 1000.0:,.1f} 百萬元"
                     card1_sub = f"月增: {selected_row['營收月增(MoM%)']:+.2f}% | 年增: {selected_row['營收年增(YoY%)']:+.2f}%"
@@ -3880,7 +4023,7 @@ if hist_close is not None and not hist_close.empty:
                     card1_sub = f"財報季度: {selected_row['財報季度']}"
                     card1_color = "#3b82f6"
                 render_metric_card(
-                    "💰 最新單月/季度營收動能",
+                    m_title,
                     card1_val,
                     card1_sub,
                     value_color=card1_color
