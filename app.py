@@ -361,24 +361,47 @@ def load_stock_names():
 
 STOCK_NAMES = load_stock_names()
 
-def get_official_taiex_data():
-    """從台灣證券交易所獲取本月份的官方大盤加權指數收盤數據"""
+def get_official_taiex_data(start_date=None, end_date=None):
+    """從台灣證券交易所 (TWSE) 官方獲取真實大盤加權指數歷史收盤數據 (支援多月回測區間)"""
     taiex_dict = {}
     try:
-        today_str = datetime.now().strftime('%Y%m%d')
-        url = f"https://www.twse.com.tw/exchangeReport/FMTQIK?response=json&date={today_str}"
+        if end_date is None:
+            end_date = datetime.now()
+        if start_date is None:
+            start_date = end_date - timedelta(days=90)
+
+        cur_year = start_date.year
+        cur_month = start_date.month
+        end_year = end_date.year
+        end_month = end_date.month
+
+        months_to_fetch = []
+        while (cur_year < end_year) or (cur_year == end_year and cur_month <= end_month):
+            date_str = f"{cur_year:04d}{cur_month:02d}01"
+            months_to_fetch.append(date_str)
+            if cur_month == 12:
+                cur_year += 1
+                cur_month = 1
+            else:
+                cur_month += 1
+
         headers = {'User-Agent': 'Mozilla/5.0'}
-        r = requests.get(url, headers=headers, timeout=5).json()
-        if r.get('status') == 'OK' and r.get('data'):
-            for row in r['data']:
-                date_parts = row[0].split('/')
-                if len(date_parts) == 3:
-                    year = int(date_parts[0]) + 1911
-                    month = int(date_parts[1])
-                    day = int(date_parts[2])
-                    date_str = f"{year:04d}-{month:02d}-{day:02d}"
-                    price = float(row[4].replace(',', ''))
-                    taiex_dict[date_str] = price
+        for m_str in months_to_fetch:
+            try:
+                url = f"https://www.twse.com.tw/exchangeReport/FMTQIK?response=json&date={m_str}"
+                r = requests.get(url, headers=headers, timeout=5).json()
+                if (r.get('stat') == 'OK' or r.get('status') == 'OK') and r.get('data'):
+                    for row in r['data']:
+                        date_parts = str(row[0]).split('/')
+                        if len(date_parts) == 3:
+                            year = int(date_parts[0]) + 1911
+                            month = int(date_parts[1])
+                            day = int(date_parts[2])
+                            dt_str = f"{year:04d}-{month:02d}-{day:02d}"
+                            price = float(str(row[4]).replace(',', ''))
+                            taiex_dict[dt_str] = price
+            except Exception:
+                continue
     except Exception:
         pass
     return taiex_dict
@@ -437,7 +460,8 @@ def get_official_tpex_data(start_date=None, end_date=None):
 @st.cache_data(ttl=900)
 def load_market_data(tickers, min_lookback_days):
     today = datetime.now()
-    end_date_str = today.strftime('%Y-%m-%d')
+    end_date = today + timedelta(days=1)
+    end_date_str = end_date.strftime('%Y-%m-%d')
     start_date = today - timedelta(days=int(min_lookback_days))
     start_date_str = start_date.strftime('%Y-%m-%d')
 
@@ -489,9 +513,9 @@ def load_market_data(tickers, min_lookback_days):
         else:
             latest_prices[t] = 0.0
 
-    # ── 證交所官方大盤數據校正 ──
+    # ── 證交所官方大盤數據校正 (支援多月回測區間) ──
     try:
-        official_taiex = get_official_taiex_data()
+        official_taiex = get_official_taiex_data(start_date, today)
         if official_taiex and "^TWII" in hist_close.columns:
             for date_str, price in official_taiex.items():
                 dt = pd.to_datetime(date_str)
@@ -500,11 +524,11 @@ def load_market_data(tickers, min_lookback_days):
             hist_close = hist_close.sort_index()
             hist_close = hist_close.ffill().bfill()
             
-            # 校正 latest_prices 中的加權指數
+            # 校正 latest_prices 中的加權指數 (盤後官方已結算當日才更新；盤中時段保留 live_prices 即時報價)
             today_date_str = today.strftime('%Y-%m-%d')
             if today_date_str in official_taiex:
                 latest_prices["^TWII"] = official_taiex[today_date_str]
-            else:
+            elif latest_prices.get("^TWII", 0.0) <= 0:
                 sorted_dates = sorted(official_taiex.keys())
                 if sorted_dates:
                     latest_prices["^TWII"] = official_taiex[sorted_dates[-1]]
@@ -522,9 +546,14 @@ def load_market_data(tickers, min_lookback_days):
             hist_close = hist_close.sort_index()
             hist_close = hist_close.ffill().bfill()
             
-            sorted_tpex_dates = sorted(official_tpex.keys())
-            if sorted_tpex_dates:
-                latest_prices["^TWOII"] = official_tpex[sorted_tpex_dates[-1]]
+            # 盤後官方已結算當日才更新，或即時報價為空時作為備援
+            today_date_str = today.strftime('%Y-%m-%d')
+            if today_date_str in official_tpex:
+                latest_prices["^TWOII"] = official_tpex[today_date_str]
+            elif latest_prices.get("^TWOII", 0.0) <= 0:
+                sorted_tpex_dates = sorted(official_tpex.keys())
+                if sorted_tpex_dates:
+                    latest_prices["^TWOII"] = official_tpex[sorted_tpex_dates[-1]]
     except Exception:
         pass
 
@@ -2546,7 +2575,34 @@ if hist_close is not None and not hist_close.empty:
     # Calculations
     current_twii_index = latest_prices.get("^TWII", float(hist_close["^TWII"].iloc[-1]))
     twii_start_price = float(hist_close["^TWII"].iloc[0]) if "^TWII" in hist_close.columns else 0.0
-    twii_period_return = ((current_twii_index - twii_start_price) / twii_start_price) * 100 if twii_start_price > 0 else 0.0
+
+    # ── 大盤加權指數同期報酬計算 (含異常值防禦與 0050 備援機制) ──
+    twii_etf_period_return = None
+    if "0050.TW" in hist_close.columns and float(hist_close["0050.TW"].iloc[0]) > 0:
+        etf50_start = float(hist_close["0050.TW"].iloc[0])
+        etf50_curr = latest_prices.get("0050.TW", float(hist_close["0050.TW"].iloc[-1]))
+        if etf50_start > 0 and etf50_curr > 0:
+            twii_etf_period_return = ((etf50_curr - etf50_start) / etf50_start) * 100
+
+    raw_twii_return = None
+    if "^TWII" in hist_close.columns and float(hist_close["^TWII"].iloc[0]) > 0:
+        if twii_start_price > 0 and current_twii_index > 0:
+            raw_twii_return = ((current_twii_index - twii_start_price) / twii_start_price) * 100
+
+    # 檢測加權指數是否有斷訊/異常損毀 (例如與 0050 累積報酬偏離超過 25%)
+    twii_is_corrupted = False
+    if raw_twii_return is not None and twii_etf_period_return is not None:
+        if abs(raw_twii_return - twii_etf_period_return) > 25.0:
+            twii_is_corrupted = True
+
+    if raw_twii_return is not None and not twii_is_corrupted:
+        twii_period_return = raw_twii_return
+    elif twii_etf_period_return is not None:
+        twii_period_return = twii_etf_period_return
+    elif raw_twii_return is not None:
+        twii_period_return = raw_twii_return
+    else:
+        twii_period_return = 0.0
 
     # ── 中小櫃買同期報酬計算 (含異常值熔斷防禦機制) ──
     otc_period_return = 0.0
@@ -2603,13 +2659,15 @@ if hist_close is not None and not hist_close.empty:
             prev_closes[t] = float(hist_close[t].iloc[-1])
 
     twii_prev_close = prev_closes.get("^TWII", current_twii_index)
-    twii_daily_return = ((current_twii_index - twii_prev_close) / twii_prev_close) * 100
+    if twii_prev_close > 0 and current_twii_index > 0:
+        twii_daily_return = ((current_twii_index - twii_prev_close) / twii_prev_close) * 100
+    else:
+        twii_daily_return = 0.0
 
-    # ── 穩健大盤今日漲跌幅校正機制 ──
-    if "0050.TW" in latest_prices and "0050.TW" in prev_closes:
-        twii_fallback_return = ((latest_prices["0050.TW"] - prev_closes["0050.TW"]) / prev_closes["0050.TW"]) * 100
-        if abs(twii_daily_return - twii_fallback_return) > 0.3:
-            twii_daily_return = twii_fallback_return
+    # ── 穩健大盤今日漲跌幅安全備援 (僅在加權指數資料完全斷訊或異常時作為最後防護) ──
+    if (twii_prev_close <= 0 or current_twii_index <= 0 or np.isnan(twii_daily_return)) and "0050.TW" in latest_prices and "0050.TW" in prev_closes:
+        if prev_closes["0050.TW"] > 0:
+            twii_daily_return = ((latest_prices["0050.TW"] - prev_closes["0050.TW"]) / prev_closes["0050.TW"]) * 100
 
     # ── 中小櫃買 (富櫃50) 漲跌幅計算 ──
     otc_current = latest_prices.get("^TWOII", latest_prices.get("006201.TWO", 0.0))
@@ -2723,7 +2781,9 @@ if hist_close is not None and not hist_close.empty:
 
         daily_portfolio_val = daily_stock_val + float(current_cash)
         if len(daily_portfolio_val) > 0 and float(daily_portfolio_val.iloc[0]) > 0:
-            portfolio_period_return = ((float(daily_portfolio_val.iloc[-1]) - float(daily_portfolio_val.iloc[0])) / float(daily_portfolio_val.iloc[0])) * 100
+            port_start_val = float(daily_portfolio_val.iloc[0])
+            port_curr_val = float(total_assets_market_value) if total_assets_market_value > 0 else float(daily_portfolio_val.iloc[-1])
+            portfolio_period_return = ((port_curr_val - port_start_val) / port_start_val) * 100
             excess_vs_twii = portfolio_period_return - twii_period_return
             excess_vs_otc = portfolio_period_return - otc_period_return
 
