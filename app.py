@@ -18,6 +18,7 @@ except Exception:
 import requests
 from bs4 import BeautifulSoup
 from io import StringIO
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 warnings.filterwarnings('ignore')
 
@@ -2770,6 +2771,24 @@ if hist_close is not None and not hist_close.empty:
     excess_vs_twii = 0.0
     excess_vs_otc = 0.0
 
+    # 避險基金級風控指標初始化
+    drawdown_series = pd.Series(dtype=float)
+    mdd_pct = 0.0
+    mdd_dollar = 0.0
+    current_dd_pct = 0.0
+    current_dd_dollar = 0.0
+    max_underwater_days = 0
+    peak_date_str = ""
+    trough_date_str = ""
+    var_1d_95_pct = 0.0
+    var_1d_99_pct = 0.0
+    var_5d_95_pct = 0.0
+    cvar_95_pct = 0.0
+    var_1d_95_dollar = 0.0
+    var_1d_99_dollar = 0.0
+    var_5d_95_dollar = 0.0
+    cvar_95_dollar = 0.0
+
     if hist_close is not None and not hist_close.empty and len(hist_close) > 5:
         # 建立歷史每日總投資組合市值 (各檔持股市值 + 當前現金)
         daily_stock_val = pd.Series(0.0, index=hist_close.index)
@@ -2810,6 +2829,45 @@ if hist_close is not None and not hist_close.empty:
                 sortino_ratio = 10.0  # 全期無任何下行虧損時的保護邊界
             else:
                 sortino_ratio = 0.0
+
+            # ── 避險基金級：最大回撤 (MDD)、水下曲線 (Underwater) 與風險價值 (VaR) 演算 ──
+            hwm = daily_portfolio_val.cummax()
+            drawdown_series = (((daily_portfolio_val - hwm) / hwm) * 100.0).fillna(0.0)
+            dollar_drawdown_series = (daily_portfolio_val - hwm).fillna(0.0)
+
+            mdd_pct = float(drawdown_series.min()) if len(drawdown_series) > 0 else 0.0
+            mdd_dollar = float(dollar_drawdown_series.min()) if len(dollar_drawdown_series) > 0 else 0.0
+            current_dd_pct = float(drawdown_series.iloc[-1]) if len(drawdown_series) > 0 else 0.0
+            current_dd_dollar = float(dollar_drawdown_series.iloc[-1]) if len(dollar_drawdown_series) > 0 else 0.0
+
+            peak_idx = daily_portfolio_val.idxmax()
+            trough_idx = drawdown_series.idxmin()
+            peak_date_str = peak_idx.strftime('%Y-%m-%d') if hasattr(peak_idx, 'strftime') else str(peak_idx)
+            trough_date_str = trough_idx.strftime('%Y-%m-%d') if hasattr(trough_idx, 'strftime') else str(trough_idx)
+
+            # 最長水下時間 (天數)
+            is_underwater = drawdown_series < -0.05
+            u_count = 0
+            for val in is_underwater:
+                if val:
+                    u_count += 1
+                    max_underwater_days = max(max_underwater_days, u_count)
+                else:
+                    u_count = 0
+
+            # 歷史模擬法計算 VaR (Value at Risk) 與 CVaR (Expected Shortfall)
+            if len(port_daily_returns) >= 10:
+                var_1d_95_pct = abs(float(np.percentile(port_daily_returns, 5))) * 100.0
+                var_1d_99_pct = abs(float(np.percentile(port_daily_returns, 1))) * 100.0
+                var_5d_95_pct = var_1d_95_pct * np.sqrt(5.0)
+
+                tail_returns = port_daily_returns[port_daily_returns <= np.percentile(port_daily_returns, 5)]
+                cvar_95_pct = abs(float(tail_returns.mean())) * 100.0 if len(tail_returns) > 0 else var_1d_95_pct
+
+            var_1d_95_dollar = total_assets_market_value * (var_1d_95_pct / 100.0)
+            var_1d_99_dollar = total_assets_market_value * (var_1d_99_pct / 100.0)
+            var_5d_95_dollar = total_assets_market_value * (var_5d_95_pct / 100.0)
+            cvar_95_dollar = total_assets_market_value * (cvar_95_pct / 100.0)
 
     # ------------------------------------------------------------
     # 📈 計算持股近 5 個交易日漲跌幅 (融合買入日期與持股成本 Avg_Cost)
@@ -3184,6 +3242,174 @@ if hist_close is not None and not hist_close.empty:
                                 )
 
         # ------------------------------------------------------------
+        # 【借貸現金流燃燒與「以息養債」自給自足排程】
+        # ------------------------------------------------------------
+        st.write("")
+        st.markdown("### ⏳ 【借貸現金流燃燒與「以息養債」自給自足排程】")
+        st.write("即時演算借貸利息燃燒速率，並自動對沖全體持股預估現金股利，監控現金流自給自足狀態：")
+        
+        # 1. 每日與每月利息負擔計算
+        daily_interest_burn = annual_interest_burn_rate / 365.0
+        monthly_interest_burn = annual_interest_burn_rate / 12.0
+
+        # 分期信貸月付金試算 (若有 Installment 信貸，按標準 7 年 84 期年金本息攤還計算)
+        monthly_installment_pmt = 0.0
+        installment_principal_total = 0.0
+        for loan_item in loans:
+            if loan_item.get('type') == 'Installment':
+                p = loan_item.get('principal', 0.0)
+                installment_principal_total += p
+                r = (loan_item.get('annual_rate', 0.0)) / 12.0
+                n = 84
+                if r > 0 and n > 0:
+                    pmt = p * (r * ((1.0 + r) ** n)) / (((1.0 + r) ** n) - 1.0)
+                else:
+                    pmt = p / max(n, 1)
+                monthly_installment_pmt += pmt
+
+        loc_monthly_interest = sum(
+            loan_item.get('principal', 0.0) * loan_item.get('annual_rate', 0.0) / 12.0
+            for loan_item in loans if loan_item.get('type') != 'Installment'
+        )
+        total_monthly_debt_outflow = monthly_installment_pmt + loc_monthly_interest
+
+        # 2. 全體持股全年度預估股利收入加總
+        val_data_map = fetch_twse_tpex_valuation_ratios()
+        total_est_annual_dividends = 0.0
+        stock_div_items = []
+
+        for _, s_row in active_stock_df.iterrows():
+            tk = s_row['Ticker'].strip().upper()
+            if tk == 'REALIZED_CASH':
+                continue
+            c_code = tk.split('.')[0]
+            sh = float(s_row.get('Shares', 0.0))
+            mv = float(s_row.get('Market_Value', 0.0))
+            s_name = s_row.get('股票名稱', c_code)
+
+            v_info = val_data_map.get(c_code, {})
+            dy_val = float(v_info.get("dividend_yield", 0.0) or 0.0)
+            dps_val = v_info.get("dividend_per_share")
+
+            est_div = 0.0
+            if dps_val is not None and float(dps_val) > 0:
+                est_div = sh * float(dps_val)
+            elif dy_val > 0 and mv > 0:
+                est_div = mv * (dy_val / 100.0)
+
+            if est_div > 0:
+                total_est_annual_dividends += est_div
+                stock_div_items.append({
+                    "code": c_code,
+                    "name": s_name,
+                    "shares": sh,
+                    "est_div": est_div,
+                    "yield": dy_val,
+                    "dps": float(dps_val) if dps_val else (est_div / sh if sh > 0 else 0.0)
+                })
+
+        # 3. 以息養債自給自足覆蓋率
+        coverage_ratio = (total_est_annual_dividends / annual_interest_burn_rate * 100.0) if annual_interest_burn_rate > 0 else 999.0
+        net_dividend_surplus = total_est_annual_dividends - annual_interest_burn_rate
+
+        # 4 張高階戰情 KPI 指標卡片
+        col_cf1, col_cf2, col_cf3, col_cf4 = st.columns(4)
+        with col_cf1:
+            render_metric_card(
+                "🔥 每日借貸利息燃燒 (Daily Burn)",
+                f"NT$ {daily_interest_burn:,.1f} / 日",
+                f"每小時消耗: NT$ {daily_interest_burn/24:,.1f} | 年化: NT$ {annual_interest_burn_rate:,.0f}",
+                "#fb7185" if daily_interest_burn > 0 else "#10b981"
+            )
+        with col_cf2:
+            sub_debt = f"純利息: NT$ {monthly_interest_burn:,.0f} | 含信貸月付: NT$ {total_monthly_debt_outflow:,.0f}" if installment_principal_total > 0 else f"隨借隨還/質押月息: NT$ {monthly_interest_burn:,.0f}"
+            render_metric_card(
+                "🏦 每月借貸現金流出",
+                f"NT$ {total_monthly_debt_outflow:,.0f} / 月",
+                sub_debt,
+                "#fb7185" if total_monthly_debt_outflow > 0 else "#10b981"
+            )
+        with col_cf3:
+            render_metric_card(
+                "🌱 預估持股全年度現金股利",
+                f"NT$ {total_est_annual_dividends:,.0f} / 年",
+                f"平均月領: NT$ {total_est_annual_dividends/12:,.0f} | 納入 {len(stock_div_items)} 檔配息股",
+                "#10b981"
+            )
+        with col_cf4:
+            cov_color = "#10b981" if coverage_ratio >= 100.0 else ("#f59e0b" if coverage_ratio >= 70.0 else "#ef4444")
+            render_metric_card(
+                "⚖️ 「以息養債」自給自足覆蓋率",
+                f"{coverage_ratio:.1f}%",
+                f"淨結餘: NT$ {net_dividend_surplus:+,.0f} / 年",
+                cov_color
+            )
+
+        # 覆蓋率狀態解讀
+        if coverage_ratio >= 100.0:
+            st.success(
+                f"🟢 **【以息養債達標 · 財務自主運轉】** 全年度預估配息 **NT$ {total_est_annual_dividends:,.0f}**，"
+                f"足以 100% 全額覆蓋借貸利息支出 **NT$ {annual_interest_burn_rate:,.0f}**！"
+                f"每年利息扣除後尚有 **NT$ {net_dividend_surplus:+,.0f}** 淨盈餘現金流（平均每月約 **NT$ {net_dividend_surplus/12:+,.0f}**），"
+                f"可持續滾入複利再投資，達到零利息自付之自我造血循環！"
+            )
+        else:
+            monthly_gap = abs(net_dividend_surplus) / 12.0
+            st.warning(
+                f"🟡 **【以息養債缺口警示】** 全年度預估配息 **NT$ {total_est_annual_dividends:,.0f}**，"
+                f"利息覆蓋率為 **{coverage_ratio:.1f}%**。全年度利息缺口為 **NT$ {abs(net_dividend_surplus):,.0f}** "
+                f"（平均每月需本業工作收入補貼現金流 **NT$ {monthly_gap:,.0f}**）。"
+            )
+
+        # 繪製月度現金流對沖長條圖
+        months_labels = [f"{m}月" for m in range(1, 13)]
+        # 股利現金流季節分配 (台股除權息與發放主要落在 7~10 月)
+        div_seasonal_weights = [0.0, 0.0, 0.0, 0.0, 0.0, 0.05, 0.25, 0.40, 0.20, 0.10, 0.0, 0.0]
+        monthly_inflows = [total_est_annual_dividends * w for w in div_seasonal_weights]
+        monthly_outflows = [total_monthly_debt_outflow] * 12
+
+        cum_net_flow = []
+        running_flow = 0.0
+        for inf, outf in zip(monthly_inflows, monthly_outflows):
+            running_flow += (inf - outf)
+            cum_net_flow.append(running_flow)
+
+        fig_cf = go.Figure()
+        fig_cf.add_trace(go.Bar(
+            x=months_labels,
+            y=monthly_inflows,
+            name="預估現金股利流入 (NT$)",
+            marker_color="rgba(16, 185, 129, 0.75)",
+            yaxis="y1"
+        ))
+        fig_cf.add_trace(go.Bar(
+            x=months_labels,
+            y=[-v for v in monthly_outflows],
+            name="借貸月付金與利息流出 (NT$)",
+            marker_color="rgba(239, 68, 68, 0.75)",
+            yaxis="y1"
+        ))
+        fig_cf.add_trace(go.Scatter(
+            x=months_labels,
+            y=cum_net_flow,
+            name="全年度累計淨現金流 (NT$)",
+            mode="lines+markers",
+            line=dict(color="#38bdf8", width=2.5),
+            marker=dict(size=6),
+            yaxis="y1"
+        ))
+        fig_cf.update_layout(
+            title="📊 全年度月度借貸現金流出 vs 預估股息流入對沖圖 (Monthly Cash Flow Balance)",
+            barmode="relative",
+            xaxis=dict(title="月份"),
+            yaxis=dict(title="金額 (NT$)", zeroline=True, zerolinecolor="rgba(255,255,255,0.2)"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            height=380,
+            margin=dict(l=40, r=40, t=50, b=40)
+        )
+        st.plotly_chart(fig_cf, use_container_width=True)
+
+        # ------------------------------------------------------------
         # 【第三部分：投資組合防線指標】
         # ------------------------------------------------------------
         st.write("")
@@ -3236,6 +3462,86 @@ if hist_close is not None and not hist_close.empty:
                 st.info(f"💡 **[AI 槓桿波動評估]** 目前槓桿 {effective_stock_leverage_mv:.2f}x，資產淨值的波動速度將是現股部位的 {effective_stock_leverage_mv:.2f} 倍，請維持對總資產維持率的日常監控。")
         else:
             st.info("💡 **[AI 槓桿狀態解讀]** 無融資與貸款狀態，零外部利息與維持率壓力，風險完全取決於持股本身的 Beta 與技術面走勢。")
+
+        # ------------------------------------------------------------
+        # 【避險基金級風控：歷史水下走勢圖 (MDD) 與風險價值 (VaR)】
+        # ------------------------------------------------------------
+        st.write("")
+        st.markdown("### 🌊 【避險基金級風控：歷史水下曲線 (MDD) 與風險價值 (VaR)】")
+        st.write("精確量化投資組合歷史最深回撤谷底、水下修復天數與常態/極端每日最大預期損失：")
+
+        col_mdd1, col_mdd2, col_mdd3, col_mdd4 = st.columns(4)
+        with col_mdd1:
+            render_metric_card(
+                "📉 歷史最大回撤 (MDD)",
+                f"{mdd_pct:.2f}%",
+                f"最深市值縮水: -NT$ {abs(mdd_dollar):,.0f} | 谷底: {trough_date_str}" if trough_date_str else "無回撤",
+                "#ef4444"
+            )
+        with col_mdd2:
+            dd_color = "#10b981" if abs(current_dd_pct) < 1.0 else ("#f59e0b" if abs(current_dd_pct) < 5.0 else "#ef4444")
+            render_metric_card(
+                "⚓ 目前水下深度 (Current Drawdown)",
+                f"{current_dd_pct:.2f}%",
+                f"距歷史新高差: -NT$ {abs(current_dd_dollar):,.0f} | 最長水下 {max_underwater_days} 天",
+                dd_color
+            )
+        with col_mdd3:
+            render_metric_card(
+                "🛡️ 1 日 95% 風險價值 (1D VaR)",
+                f"-NT$ {var_1d_95_dollar:,.0f}",
+                f"單日最大常態虧損: -{var_1d_95_pct:.2f}% (95% 信心)",
+                "#38bdf8"
+            )
+        with col_mdd4:
+            render_metric_card(
+                "🌪️ 條件尾部風險值 (95% CVaR)",
+                f"-NT$ {cvar_95_dollar:,.0f}",
+                f"黑天鵝突破均損: -{cvar_95_pct:.2f}% | 次週5D VaR: -NT$ {var_5d_95_dollar:,.0f}",
+                "#fb7185"
+            )
+
+        if not drawdown_series.empty:
+            fig_underwater = go.Figure()
+            fig_underwater.add_trace(go.Scatter(
+                x=drawdown_series.index,
+                y=drawdown_series.values,
+                name="水下回撤幅度 (%)",
+                mode="lines",
+                line=dict(color="#ef4444", width=2.2),
+                fill="tozeroy",
+                fillcolor="rgba(239, 68, 68, 0.20)",
+                hovertemplate="日期: %{x|%Y-%m-%d}<br>回撤幅度: %{y:.2f}%<extra></extra>"
+            ))
+            # 標註歷史最大回撤點
+            if len(drawdown_series) > 0 and mdd_pct < 0 and trough_idx in drawdown_series.index:
+                fig_underwater.add_trace(go.Scatter(
+                    x=[trough_idx],
+                    y=[mdd_pct],
+                    mode="markers+text",
+                    name="歷史最深回撤點 (MDD)",
+                    marker=dict(color="#ff0055", size=9, symbol="diamond"),
+                    text=[f"最深回撤: {mdd_pct:.2f}%"],
+                    textposition="bottom center",
+                    hoverinfo="skip"
+                ))
+            fig_underwater.update_layout(
+                title=f"🌊 投資組合歷史水下走勢圖 (Underwater Curve) — 歷史峰值日: {peak_date_str} | 最深回撤日: {trough_date_str}",
+                xaxis=dict(title="日期", showgrid=True, gridcolor="rgba(255,255,255,0.06)"),
+                yaxis=dict(title="自最高峰回撤幅度 (%)", zeroline=True, zerolinecolor="rgba(255,255,255,0.3)", gridcolor="rgba(255,255,255,0.06)"),
+                height=380,
+                margin=dict(l=40, r=40, t=50, b=40),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+            )
+            st.plotly_chart(fig_underwater, use_container_width=True)
+
+            st.caption(
+                f"ℹ️ **避險基金量化風險指標解讀**：<br>"
+                f"1. **歷史最大回撤 (MDD = {mdd_pct:.2f}%)**：代表在過去 {min_lookback_days} 天內，若在最高點買入到跌至谷底的最大帳面回撤幅度。最長連續水下修復期為 **{max_underwater_days} 天**。<br>"
+                f"2. **風險價值 (VaR 95% = -NT$ {var_1d_95_dollar:,.0f})**：依歷史日報酬率分佈，在 95% 正常交易日中，單日損失不會超過此金額；次週 5 個交易日累積 VaR 估計為 **-NT$ {var_5d_95_dollar:,.0f}** (-{var_5d_95_pct:.2f}%)。<br>"
+                f"3. **條件風險值 (CVaR 95% = -NT$ {cvar_95_dollar:,.0f})**：又稱預期尾部損失 (Expected Shortfall)，衡量一旦發生最倒楣的 5% 黑天鵝大跌時，平均預期會損失的真實金額。",
+                unsafe_allow_html=True
+            )
 
         # ------------------------------------------------------------
         # 【第四部分：雙向極端壓力測試】
@@ -3551,19 +3857,20 @@ if hist_close is not None and not hist_close.empty:
 
 
 
-        def fetch_stock_news_requests_fallback(stock_code):
-            """免瀏覽器核心的 HTTP 輕量級綜合重訊與除權息爬蟲 (當 Playwright 崩潰時自動降級備援使用)"""
+        def fetch_stock_news_requests_fallback(stock_code, _session=None):
+            """免瀏覽器核心的 HTTP 輕量級綜合重訊與除權息爬蟲 (支援外部 Session 連線複用)"""
             today_date_obj = date.today()
             current_tw_year_str = str(today_date_obj.year - 1911)
             
-            session = requests.Session()
+            session = _session if _session is not None else requests.Session()
             headers_get = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             }
-            try:
-                session.get("https://mopsov.twse.com.tw/mops/web/t146sb05", headers=headers_get, timeout=6)
-            except:
-                pass
+            if _session is None:
+                try:
+                    session.get("https://mopsov.twse.com.tw/mops/web/t146sb05", headers=headers_get, timeout=4.0)
+                except Exception:
+                    pass
                 
             headers_post = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -3596,7 +3903,7 @@ if hist_close is not None and not hist_close.empty:
             for url in endpoints:
                 try:
                     headers_post["Referer"] = url.replace("/ajax_", "/")
-                    resp = session.post(url, data=post_data, headers=headers_post, timeout=10)
+                    resp = session.post(url, data=post_data, headers=headers_post, timeout=5.0)
                     if resp.status_code != 200:
                         continue
                     
@@ -3663,98 +3970,142 @@ if hist_close is not None and not hist_close.empty:
                     unique_news.append(item)
             return unique_news
 
-        def run_scraper(stocks_list, status_placeholder, progress_bar):
+        def run_scraper_parallel(stocks_list, status_placeholder, progress_bar):
             results = []
             total = len(stocks_list)
-            for i, stock in enumerate(stocks_list):
-                news = fetch_stock_news_requests_fallback(stock)
-                results.append((stock, news))
-                percent = (i + 1) / total
-                status_placeholder.write(f"⏳ **[HTTP 備援引擎]** 已完成掃描個股：{get_stock_name_by_code(stock)} ({stock}) (進度: {i+1}/{total})")
-                progress_bar.progress(percent)
-                time.sleep(0.3)
+            completed_count = 0
+            
+            shared_session = requests.Session()
+            adapter = requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=10, max_retries=1)
+            shared_session.mount("https://", adapter)
+            shared_session.mount("http://", adapter)
+
+            def _scrape_single(stock):
+                try:
+                    res_news = fetch_stock_news_requests_fallback(stock, _session=shared_session)
+                    return stock, res_news
+                except Exception:
+                    return stock, []
+
+            with ThreadPoolExecutor(max_workers=min(8, total)) as executor:
+                futures = [executor.submit(_scrape_single, s) for s in stocks_list]
+                for future in as_completed(futures):
+                    stock, news_res = future.result()
+                    results.append((stock, news_res))
+                    completed_count += 1
+                    percent = completed_count / total
+                    status_placeholder.write(f"⚡ **[極速並行引擎]** 已完成掃描個股：{get_stock_name_by_code(stock)} ({stock}) (進度: {completed_count}/{total})")
+                    progress_bar.progress(percent)
+
+            order_map = {s: i for i, s in enumerate(stocks_list)}
+            results.sort(key=lambda x: order_map.get(x[0], 0))
             return results
 
-        if st.button("📡 啟動即時公開資訊觀測站重訊掃描"):
+        # 初始化 Session State 快取狀態
+        if 'mops_scan_results' not in st.session_state:
+            st.session_state['mops_scan_results'] = None
+        if 'mops_last_scan_time' not in st.session_state:
+            st.session_state['mops_last_scan_time'] = None
+
+        col_mops_btn1, col_mops_btn2 = st.columns([3, 2])
+        with col_mops_btn1:
+            btn_txt = "⚡ 重新發動即時重訊極速掃描 (多線程並行)" if st.session_state['mops_scan_results'] is not None else "📡 啟動即時公開資訊觀測站重訊掃描 (多線程並行)"
+            start_mops_scan = st.button(btn_txt, key="start_mops_scan_btn", use_container_width=True)
+        with col_mops_btn2:
+            if st.session_state['mops_last_scan_time']:
+                st.caption(f"🕒 **最近完成掃描**：{st.session_state['mops_last_scan_time']} (切換分頁結果保留)")
+            else:
+                st.caption("💡 採用 ThreadPoolExecutor 並行極速抓取，預估 2~4 秒內完成全持股掃描。")
+
+        if start_mops_scan:
             if not my_stocks_dynamic:
                 st.warning("⚠️ 庫存中無個股，無法執行掃描任務。")
             else:
                 status_placeholder = st.empty()
                 progress_bar = st.progress(0.0)
-                with st.spinner("⚡ 正在發動輕量級重訊極速引擎，全速觀測中..."):
-                    results = run_scraper(my_stocks_dynamic, status_placeholder, progress_bar)
+                t_scan_start = time.time()
+                with st.spinner("⚡ 正在發動 ThreadPoolExecutor 極速觀測引擎，多線程全速觀測中..."):
+                    scan_results = run_scraper_parallel(my_stocks_dynamic, status_placeholder, progress_bar)
+                t_scan_cost = time.time() - t_scan_start
                 
                 progress_bar.empty()
                 status_placeholder.empty()
-                
-                total_alerts = 0
-                today_alerts = 0
-                alert_stocks = []
-                clean_stocks = []
-                
-                for stock, news_list in results:
-                    if news_list:
-                        alert_stocks.append((stock, news_list))
-                        total_alerts += len(news_list)
-                        today_alerts += sum(1 for item in news_list if item["is_today"])
-                    else:
-                        clean_stocks.append(stock)
-                
-                col_sum1, col_sum2 = st.columns(2)
-                with col_sum1:
-                    st.markdown(f"""
-                    <div style='background: linear-gradient(135deg, rgba(56, 189, 248, 0.04) 0%, rgba(56, 189, 248, 0.08) 100%);
-                                padding: 18px 20px; border-radius: 8px; border: 1px solid rgba(56, 189, 248, 0.15);
-                                border-left: 5px solid #38bdf8; margin-bottom: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.02);'>
-                        <div style='font-size: 12px; color: var(--text-color); opacity: 0.7; font-weight: 600;'>近 30 天重要訊息總數</div>
-                        <div style='font-size: 26px; font-weight: 800; margin: 4px 0; color: #38bdf8;'>{total_alerts} 筆</div>
-                        <div style='font-size: 12px; color: var(--text-color); opacity: 0.65;'>30天內公開觀測站重大訊息總計</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                with col_sum2:
-                    st.markdown(f"""
-                    <div style='background: linear-gradient(135deg, rgba(255, 75, 75, 0.04) 0%, rgba(255, 75, 75, 0.08) 100%);
-                                padding: 18px 20px; border-radius: 8px; border: 1px solid rgba(255, 75, 75, 0.15);
-                                border-left: 5px solid #ff4b4b; margin-bottom: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.02);'>
-                        <div style='font-size: 12px; color: var(--text-color); opacity: 0.7; font-weight: 600;'>今日最新即時發布</div>
-                        <div style='font-size: 26px; font-weight: 800; margin: 4px 0; color: #ff4b4b;'>{today_alerts} 筆</div>
-                        <div style='font-size: 12px; color: var(--text-color); opacity: 0.65;'>今日新公布之即時重訊</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                
-                st.markdown("---")
-                
-                alert_stocks_sorted = sorted(
-                    alert_stocks,
-                    key=lambda x: (any(n["is_today"] for n in x[1]), len(x[1])),
-                    reverse=True
-                )
-                
-                if alert_stocks_sorted:
-                    st.markdown("#### 🎯 攔截重訊個股明細 (🔥 今日發布個股已置頂)")
-                    for stock, news_list in alert_stocks_sorted:
-                        stock_name = get_stock_name_by_code(stock)
-                        has_today = any(news_item["is_today"] for news_item in news_list)
+
+                st.session_state['mops_scan_results'] = scan_results
+                st.session_state['mops_last_scan_time'] = f"{datetime.now(TW_TZ).strftime('%H:%M:%S')} (耗時 {t_scan_cost:.2f} 秒)"
+                st.rerun()
+
+        # 只要存在掃描結果即渲染呈現 (切換 Tab 絕不丟失)
+        if st.session_state['mops_scan_results'] is not None:
+            results = st.session_state['mops_scan_results']
+            total_alerts = 0
+            today_alerts = 0
+            alert_stocks = []
+            clean_stocks = []
+            
+            for stock, news_list in results:
+                if news_list:
+                    alert_stocks.append((stock, news_list))
+                    total_alerts += len(news_list)
+                    today_alerts += sum(1 for item in news_list if item["is_today"])
+                else:
+                    clean_stocks.append(stock)
+            
+            col_sum1, col_sum2 = st.columns(2)
+            with col_sum1:
+                st.markdown(f"""
+                <div style='background: linear-gradient(135deg, rgba(56, 189, 248, 0.04) 0%, rgba(56, 189, 248, 0.08) 100%);
+                            padding: 18px 20px; border-radius: 8px; border: 1px solid rgba(56, 189, 248, 0.15);
+                            border-left: 5px solid #38bdf8; margin-bottom: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.02);'>
+                    <div style='font-size: 12px; color: var(--text-color); opacity: 0.7; font-weight: 600;'>近 30 天重要訊息總數</div>
+                    <div style='font-size: 26px; font-weight: 800; margin: 4px 0; color: #38bdf8;'>{total_alerts} 筆</div>
+                    <div style='font-size: 12px; color: var(--text-color); opacity: 0.65;'>30天內公開觀測站重大訊息總計</div>
+                </div>
+                """, unsafe_allow_html=True)
+            with col_sum2:
+                st.markdown(f"""
+                <div style='background: linear-gradient(135deg, rgba(255, 75, 75, 0.04) 0%, rgba(255, 75, 75, 0.08) 100%);
+                            padding: 18px 20px; border-radius: 8px; border: 1px solid rgba(255, 75, 75, 0.15);
+                            border-left: 5px solid #ff4b4b; margin-bottom: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.02);'>
+                    <div style='font-size: 12px; color: var(--text-color); opacity: 0.7; font-weight: 600;'>今日最新即時發布</div>
+                    <div style='font-size: 26px; font-weight: 800; margin: 4px 0; color: #ff4b4b;'>{today_alerts} 筆</div>
+                    <div style='font-size: 12px; color: var(--text-color); opacity: 0.65;'>今日新公布之即時重訊</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            st.markdown("---")
+            
+            alert_stocks_sorted = sorted(
+                alert_stocks,
+                key=lambda x: (any(n["is_today"] for n in x[1]), len(x[1])),
+                reverse=True
+            )
+            
+            if alert_stocks_sorted:
+                st.markdown("#### 🎯 攔截重訊個股明細 (🔥 今日發布個股已置頂)")
+                for stock, news_list in alert_stocks_sorted:
+                    stock_name = get_stock_name_by_code(stock)
+                    has_today = any(news_item["is_today"] for news_item in news_list)
+                    
+                    expander_title = f"🔴 【{stock_name} ({stock})】 攔截到 {len(news_list)} 筆重大訊息"
+                    if has_today:
+                        expander_title = f"🔥 【{stock_name} ({stock})】 今日最新即時重大訊息！(共 {len(news_list)} 筆)"
                         
-                        expander_title = f"🔴 【{stock_name} ({stock})】 攔截到 {len(news_list)} 筆重大訊息"
-                        if has_today:
-                            expander_title = f"🔥 【{stock_name} ({stock})】 今日最新即時重大訊息！(共 {len(news_list)} 筆)"
-                            
-                        with st.expander(expander_title, expanded=True):
-                            # 將重訊排序：以 date 欄位進行由新到舊排序 (新 -> 舊)
-                            sorted_news_list = sorted(news_list, key=lambda x: x.get("date") if x.get("date") is not None else date.min, reverse=True)
-                            for news_item in sorted_news_list:
-                                if news_item["is_today"]:
-                                    st.markdown(f"<div style='color:#ef4444; font-weight:bold; padding: 4px 0;'>🔥 [今日即時] {news_item['text']}</div>", unsafe_allow_html=True)
-                                else:
-                                    st.markdown(f"<div style='color:gray; padding: 2px 0;'>• {news_item['text']}</div>", unsafe_allow_html=True)
-                
-                if clean_stocks:
-                    clean_displays = [f"{get_stock_name_by_code(s)} ({s})" for s in clean_stocks]
-                    with st.expander(f"✅ 近一個月內無重訊個股 (共 {len(clean_stocks)} 檔)", expanded=False):
-                        st.write(", ".join(clean_displays))
-                        
-                st.success("🎉 重訊掃描任務精準執行完成！")
+                    with st.expander(expander_title, expanded=True):
+                        # 將重訊排序：以 date 欄位進行由新到舊排序 (新 -> 舊)
+                        sorted_news_list = sorted(news_list, key=lambda x: x.get("date") if x.get("date") is not None else date.min, reverse=True)
+                        for news_item in sorted_news_list:
+                            if news_item["is_today"]:
+                                st.markdown(f"<div style='color:#ef4444; font-weight:bold; padding: 4px 0;'>🔥 [今日即時] {news_item['text']}</div>", unsafe_allow_html=True)
+                            else:
+                                st.markdown(f"<div style='color:gray; padding: 2px 0;'>• {news_item['text']}</div>", unsafe_allow_html=True)
+            
+            if clean_stocks:
+                clean_displays = [f"{get_stock_name_by_code(s)} ({s})" for s in clean_stocks]
+                with st.expander(f"✅ 近一個月內無重訊個股 (共 {len(clean_stocks)} 檔)", expanded=False):
+                    st.write(", ".join(clean_displays))
+                    
+            st.success("🎉 重訊掃描任務精準執行完成！")
 
     # ============================================================
     # Tab 3: Fundamental & Revenue Tracking (持股基本面與營收追蹤)
