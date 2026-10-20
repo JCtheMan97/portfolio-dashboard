@@ -3242,13 +3242,13 @@ if hist_close is not None and not hist_close.empty:
                                 )
 
         # ------------------------------------------------------------
-        # 【借貸現金流燃燒與「以息養債」自給自足排程】
+        # 【融資借貸利息燃燒與持有成本】
         # ------------------------------------------------------------
         st.write("")
-        st.markdown("### ⏳ 【借貸現金流燃燒與「以息養債」自給自足排程】")
-        st.write("即時演算借貸利息燃燒速率，並自動對沖全體持股預估現金股利，監控現金流自給自足狀態：")
+        st.markdown("### ⏳ 【融資借貸利息燃燒與持有成本】")
+        st.write("即時監控槓桿工具的持有成本（融資租金），隨時掌握資金消耗速率：")
         
-        # 1. 每日與每月利息負擔計算
+        # 每日與每月利息負擔計算
         daily_interest_burn = annual_interest_burn_rate / 365.0
         monthly_interest_burn = annual_interest_burn_rate / 12.0
 
@@ -3273,141 +3273,42 @@ if hist_close is not None and not hist_close.empty:
         )
         total_monthly_debt_outflow = monthly_installment_pmt + loc_monthly_interest
 
-        # 2. 全體持股全年度預估股利收入加總
-        val_data_map = fetch_twse_tpex_valuation_ratios()
-        total_est_annual_dividends = 0.0
-        stock_div_items = []
-
-        for _, s_row in active_stock_df.iterrows():
-            tk = s_row['Ticker'].strip().upper()
-            if tk == 'REALIZED_CASH':
-                continue
-            c_code = tk.split('.')[0]
-            sh = float(s_row.get('Shares', 0.0))
-            mv = float(s_row.get('Market_Value', 0.0))
-            s_name = s_row.get('股票名稱', c_code)
-
-            v_info = val_data_map.get(c_code, {})
-            dy_val = float(v_info.get("dividend_yield", 0.0) or 0.0)
-            dps_val = v_info.get("dividend_per_share")
-
-            est_div = 0.0
-            if dps_val is not None and float(dps_val) > 0:
-                est_div = sh * float(dps_val)
-            elif dy_val > 0 and mv > 0:
-                est_div = mv * (dy_val / 100.0)
-
-            if est_div > 0:
-                total_est_annual_dividends += est_div
-                stock_div_items.append({
-                    "code": c_code,
-                    "name": s_name,
-                    "shares": sh,
-                    "est_div": est_div,
-                    "yield": dy_val,
-                    "dps": float(dps_val) if dps_val else (est_div / sh if sh > 0 else 0.0)
-                })
-
-        # 3. 以息養債自給自足覆蓋率
-        coverage_ratio = (total_est_annual_dividends / annual_interest_burn_rate * 100.0) if annual_interest_burn_rate > 0 else 999.0
-        net_dividend_surplus = total_est_annual_dividends - annual_interest_burn_rate
-
-        # 4 張高階戰情 KPI 指標卡片
-        col_cf1, col_cf2, col_cf3, col_cf4 = st.columns(4)
-        with col_cf1:
+        col_burn1, col_burn2, col_burn3 = st.columns(3)
+        with col_burn1:
             render_metric_card(
-                "🔥 每日借貸利息燃燒 (Daily Burn)",
+                "🔥 每日睜開眼利息支出",
                 f"NT$ {daily_interest_burn:,.1f} / 日",
-                f"每小時消耗: NT$ {daily_interest_burn/24:,.1f} | 年化: NT$ {annual_interest_burn_rate:,.0f}",
+                f"每小時消耗: NT$ {daily_interest_burn/24:,.1f} | 全年利息: NT$ {annual_interest_burn_rate:,.0f}",
                 "#fb7185" if daily_interest_burn > 0 else "#10b981"
             )
-        with col_cf2:
-            sub_debt = f"純利息: NT$ {monthly_interest_burn:,.0f} | 含信貸月付: NT$ {total_monthly_debt_outflow:,.0f}" if installment_principal_total > 0 else f"隨借隨還/質押月息: NT$ {monthly_interest_burn:,.0f}"
+        with col_burn2:
             render_metric_card(
-                "🏦 每月借貸現金流出",
-                f"NT$ {total_monthly_debt_outflow:,.0f} / 月",
-                sub_debt,
-                "#fb7185" if total_monthly_debt_outflow > 0 else "#10b981"
+                "🏦 每月純融資利息負擔",
+                f"NT$ {monthly_interest_burn:,.0f} / 月",
+                f"隨借隨還/質押月息: NT$ {loc_monthly_interest:,.0f} | 信貸月息: NT$ {monthly_interest_burn - loc_monthly_interest:,.0f}",
+                "#f59e0b" if monthly_interest_burn > 0 else "#10b981"
             )
-        with col_cf3:
-            render_metric_card(
-                "🌱 預估持股全年度現金股利",
-                f"NT$ {total_est_annual_dividends:,.0f} / 年",
-                f"平均月領: NT$ {total_est_annual_dividends/12:,.0f} | 納入 {len(stock_div_items)} 檔配息股",
-                "#10b981"
-            )
-        with col_cf4:
-            cov_color = "#10b981" if coverage_ratio >= 100.0 else ("#f59e0b" if coverage_ratio >= 70.0 else "#ef4444")
-            render_metric_card(
-                "⚖️ 「以息養債」自給自足覆蓋率",
-                f"{coverage_ratio:.1f}%",
-                f"淨結餘: NT$ {net_dividend_surplus:+,.0f} / 年",
-                cov_color
-            )
+        with col_burn3:
+            if installment_principal_total > 0:
+                render_metric_card(
+                    "💳 每月本息現金總負擔",
+                    f"NT$ {total_monthly_debt_outflow:,.0f} / 月",
+                    f"含信貸 7 年期本息攤還: NT$ {monthly_installment_pmt:,.0f} / 月",
+                    "#38bdf8"
+                )
+            else:
+                render_metric_card(
+                    "💳 每月本息現金總負擔",
+                    f"NT$ {monthly_interest_burn:,.0f} / 月",
+                    "全數為純繳息額度 (無分期本金攤還)",
+                    "#38bdf8"
+                )
 
-        # 覆蓋率狀態解讀
-        if coverage_ratio >= 100.0:
-            st.success(
-                f"🟢 **【以息養債達標 · 財務自主運轉】** 全年度預估配息 **NT$ {total_est_annual_dividends:,.0f}**，"
-                f"足以 100% 全額覆蓋借貸利息支出 **NT$ {annual_interest_burn_rate:,.0f}**！"
-                f"每年利息扣除後尚有 **NT$ {net_dividend_surplus:+,.0f}** 淨盈餘現金流（平均每月約 **NT$ {net_dividend_surplus/12:+,.0f}**），"
-                f"可持續滾入複利再投資，達到零利息自付之自我造血循環！"
+        if daily_interest_burn > 0:
+            st.caption(
+                f"💡 **融資租金提示**：您目前的借貸資金成本約為每天 **NT$ {daily_interest_burn:,.1f}**（每月約 **NT$ {monthly_interest_burn:,.0f}**）。"
+                f"只要成長股波段攻勢與翻倍獲利超越此成本，槓桿即發揮進攻加成效果；在高檔分批獲利了結 1/3 抽回本金或償還 LOC，即可快速減輕此利息負擔。"
             )
-        else:
-            monthly_gap = abs(net_dividend_surplus) / 12.0
-            st.warning(
-                f"🟡 **【以息養債缺口警示】** 全年度預估配息 **NT$ {total_est_annual_dividends:,.0f}**，"
-                f"利息覆蓋率為 **{coverage_ratio:.1f}%**。全年度利息缺口為 **NT$ {abs(net_dividend_surplus):,.0f}** "
-                f"（平均每月需本業工作收入補貼現金流 **NT$ {monthly_gap:,.0f}**）。"
-            )
-
-        # 繪製月度現金流對沖長條圖
-        months_labels = [f"{m}月" for m in range(1, 13)]
-        # 股利現金流季節分配 (台股除權息與發放主要落在 7~10 月)
-        div_seasonal_weights = [0.0, 0.0, 0.0, 0.0, 0.0, 0.05, 0.25, 0.40, 0.20, 0.10, 0.0, 0.0]
-        monthly_inflows = [total_est_annual_dividends * w for w in div_seasonal_weights]
-        monthly_outflows = [total_monthly_debt_outflow] * 12
-
-        cum_net_flow = []
-        running_flow = 0.0
-        for inf, outf in zip(monthly_inflows, monthly_outflows):
-            running_flow += (inf - outf)
-            cum_net_flow.append(running_flow)
-
-        fig_cf = go.Figure()
-        fig_cf.add_trace(go.Bar(
-            x=months_labels,
-            y=monthly_inflows,
-            name="預估現金股利流入 (NT$)",
-            marker_color="rgba(16, 185, 129, 0.75)",
-            yaxis="y1"
-        ))
-        fig_cf.add_trace(go.Bar(
-            x=months_labels,
-            y=[-v for v in monthly_outflows],
-            name="借貸月付金與利息流出 (NT$)",
-            marker_color="rgba(239, 68, 68, 0.75)",
-            yaxis="y1"
-        ))
-        fig_cf.add_trace(go.Scatter(
-            x=months_labels,
-            y=cum_net_flow,
-            name="全年度累計淨現金流 (NT$)",
-            mode="lines+markers",
-            line=dict(color="#38bdf8", width=2.5),
-            marker=dict(size=6),
-            yaxis="y1"
-        ))
-        fig_cf.update_layout(
-            title="📊 全年度月度借貸現金流出 vs 預估股息流入對沖圖 (Monthly Cash Flow Balance)",
-            barmode="relative",
-            xaxis=dict(title="月份"),
-            yaxis=dict(title="金額 (NT$)", zeroline=True, zerolinecolor="rgba(255,255,255,0.2)"),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-            height=380,
-            margin=dict(l=40, r=40, t=50, b=40)
-        )
-        st.plotly_chart(fig_cf, use_container_width=True)
 
         # ------------------------------------------------------------
         # 【第三部分：投資組合防線指標】
