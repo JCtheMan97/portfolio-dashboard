@@ -2596,6 +2596,10 @@ if hist_close is not None and not hist_close.empty:
         if abs(raw_twii_return - twii_etf_period_return) > 25.0:
             twii_is_corrupted = True
 
+    # 雙口徑儲存：含息總報酬 (0050 TR) 與 價格指數 (^TWII PR)
+    twii_tr_return = twii_etf_period_return if twii_etf_period_return is not None else (raw_twii_return or 0.0)
+    twii_pr_return = raw_twii_return if (raw_twii_return is not None and not twii_is_corrupted) else (twii_etf_period_return or 0.0)
+
     if raw_twii_return is not None and not twii_is_corrupted:
         twii_period_return = raw_twii_return
     elif twii_etf_period_return is not None:
@@ -2631,6 +2635,10 @@ if hist_close is not None and not hist_close.empty:
         elif etf_period_return is not None and abs(raw_twoii_return - etf_period_return) > 15.0:
             is_corrupted = True
 
+    # 雙口徑儲存：含息總報酬 (富櫃50 TR) 與 價格指數 (^TWOII PR)
+    otc_tr_return = etf_period_return if etf_period_return is not None else (raw_twoii_return or 0.0)
+    otc_pr_return = raw_twoii_return if (raw_twoii_return is not None and not is_corrupted) else (etf_period_return or 0.0)
+
     if (raw_twoii_return is not None) and not is_corrupted:
         otc_period_return = raw_twoii_return
         otc_display_name = "中小櫃買 (櫃買指數)"
@@ -2643,6 +2651,12 @@ if hist_close is not None and not hist_close.empty:
         otc_display_name = "中小櫃買 (櫃買指數)"
     else:
         otc_period_return = 0.0
+
+    # 基準每日報酬率序列 (用於計算追蹤誤差與資訊比率)
+    twii_daily_returns = hist_close["^TWII"].pct_change().dropna() if "^TWII" in hist_close.columns else pd.Series(dtype=float)
+    etf50_daily_returns = hist_close["0050.TW"].pct_change().dropna() if "0050.TW" in hist_close.columns else pd.Series(dtype=float)
+    twoii_daily_returns = hist_close["^TWOII"].pct_change().dropna() if "^TWOII" in hist_close.columns else pd.Series(dtype=float)
+    etfotc_daily_returns = hist_close["006201.TWO"].pct_change().dropna() if "006201.TWO" in hist_close.columns else pd.Series(dtype=float)
 
     # Daily Return reference
     prev_closes = {}
@@ -3314,7 +3328,90 @@ if hist_close is not None and not hist_close.empty:
         # 【第三部分：投資組合防線指標】
         # ------------------------------------------------------------
         st.write("")
-        st.markdown("### 🏆 【第三部分：投資組合防線指標】")
+        c_title_s3, c_toggle_s3 = st.columns([1.1, 1.9])
+        with c_title_s3:
+            st.markdown("### 🏆 【第三部分：投資組合防線指標】")
+        with c_toggle_s3:
+            sec3_bm_mode = st.radio(
+                "基準對決口徑",
+                [
+                    "✨ 含息總報酬 (Total Return: 0050 / 富櫃50) [同口徑推薦]",
+                    "🏛️ 傳統價格指數 (Price Return: 加權 / 櫃買) [未含息]"
+                ],
+                horizontal=True,
+                label_visibility="collapsed",
+                key="sec3_bm_mode_toggle"
+            )
+
+        is_tr_mode = "含息總報酬" in sec3_bm_mode
+
+        if is_tr_mode:
+            twii_disp_title = "🏛️ 台灣50 (0050.TW 含息總報酬)"
+            twii_selected_return = twii_tr_return
+            twii_daily_bm = etf50_daily_returns if not etf50_daily_returns.empty else twii_daily_returns
+            otc_disp_title = "🏬 富櫃50 (006201 含息總報酬)"
+            otc_selected_return = otc_tr_return
+            otc_daily_bm = etfotc_daily_returns if not etfotc_daily_returns.empty else twoii_daily_returns
+            bm_note = "✨ <b>口徑完全對齊 (Apples-to-Apples)</b>：投組與基準均使用 Yahoo Finance 含息還原收盤價 (Total Return)，徹底消除每年 3.5%~4% 的除息蒸發偏差。"
+        else:
+            twii_disp_title = "🏛️ 加權指數 (^TWII 價格指數)"
+            twii_selected_return = twii_pr_return
+            twii_daily_bm = twii_daily_returns
+            otc_disp_title = f"🏬 {otc_display_name} (價格指數)"
+            otc_selected_return = otc_pr_return
+            otc_daily_bm = twoii_daily_returns
+            bm_note = "⚠️ <b>注意</b>：傳統加權與櫃買為純價格指數 (未含息)，每年 6~9 月除息旺季約蒸發 3.5%~4% 點數，對比會微幅高估投組領先幅度。"
+
+        excess_vs_twii = portfolio_period_return - twii_selected_return
+        excess_vs_otc = portfolio_period_return - otc_selected_return
+
+        lookback_days_n = max(float(min_lookback_days), 1.0)
+        # 期間無風險利率
+        rf_period = (annual_rf / 100.0) * (lookback_days_n / 365.0) * 100.0
+        # CAPM 預期報酬率 = Rf + Beta * (Rm - Rf)
+        capm_expected_return = rf_period + portfolio_weighted_beta * (twii_selected_return - rf_period)
+        # 期間詹森阿爾法與年化阿爾法
+        jensen_alpha_period = portfolio_period_return - capm_expected_return
+        jensen_alpha_annual = jensen_alpha_period * (365.0 / lookback_days_n)
+
+        # 年化追蹤誤差 (Tracking Error) 與 資訊比率 (Information Ratio)
+        ir_ratio = 0.0
+        tracking_error_annual = 0.0
+        if not twii_daily_bm.empty and len(port_daily_returns) >= 5:
+            aligned_diff = pd.concat([port_daily_returns, twii_daily_bm], axis=1).dropna()
+            if len(aligned_diff) >= 5:
+                diff_daily = aligned_diff.iloc[:, 0] - aligned_diff.iloc[:, 1]
+                tracking_error_annual = float(diff_daily.std(ddof=1)) * np.sqrt(252.0) * 100.0
+                mean_diff_annual = float(diff_daily.mean()) * 252.0 * 100.0
+                if tracking_error_annual > 1e-4:
+                    ir_ratio = mean_diff_annual / tracking_error_annual
+
+        # 實質淨阿爾法 (扣除融資利息成本門檻)
+        hurdle_rate_annual = hurdle_rate_roe
+        net_hurdle_alpha = jensen_alpha_annual - hurdle_rate_annual
+
+        # ── AI 主動選股評級徽章判定 ──
+        if jensen_alpha_annual >= 5.0 and sortino_ratio >= 1.5:
+            rating_title = "🏆 頂尖卓越 Alpha"
+            rating_badge_color = "#10b981"
+            rating_verdict = f"<b>[頂尖主動選股品質]</b> 選股眼光極佳！在精確剔除市場 Beta ({portfolio_weighted_beta:.2f}x) 後，年化純阿爾法達 <b>{jensen_alpha_annual:+.1f}%</b>，且索提諾比率達 <b>{sortino_ratio:.2f}</b>（下行保護極佳）。扣除每年約 {hurdle_rate_annual:.1f}% 借貸利息後仍保有 <b>{net_hurdle_alpha:+.1f}%</b> 實質淨勝率，成功把主動選股價值最大化！"
+        elif jensen_alpha_annual >= 0.0 and sortino_ratio >= 1.0:
+            rating_title = "🚀 穩健領先 Alpha"
+            rating_badge_color = "#10b981"
+            rating_verdict = f"<b>[穩健獲利型]</b> 具備正向選股超額回報 (年化 Alpha <b>{jensen_alpha_annual:+.1f}%</b>)，波動控制在健康水準 (索提諾 <b>{sortino_ratio:.2f}</b>)。扣除每年 {hurdle_rate_annual:.1f}% 借貸利息後實質淨超額為 <b>{net_hurdle_alpha:+.1f}%</b>，整體表現優於同等風險大盤基準。"
+        elif excess_vs_twii > 0 and jensen_alpha_annual < 0.0:
+            rating_title = "⚡ 進攻型高 Beta (隨波逐流)"
+            rating_badge_color = "#f59e0b"
+            rating_verdict = f"<b>[高 Beta 順風車]</b> 雖然帳面報酬領先基準 <b>{excess_vs_twii:+.1f}%</b>，但因組合 Beta 達 <b>{portfolio_weighted_beta:.2f}</b>，CAPM 預期本就應漲 {capm_expected_return:+.1f}%。年化 Alpha 為 <b>{jensen_alpha_annual:+.1f}%</b>，說明帳面獲利主要是順境時承受高波動放大，而非選股超額，回檔時需嚴防回撤！"
+        elif -3.0 <= jensen_alpha_annual < 0.0:
+            rating_title = "⚖️ 平庸貼合指數 (擬指數化)"
+            rating_badge_color = "#38bdf8"
+            rating_verdict = f"<b>[櫥窗被動化警訊]</b> 目前持有 {len(active_stock_df)} 檔股票已高度分散（擬指數化），報酬率緊貼大盤基準，年化選股 Alpha 僅 <b>{jensen_alpha_annual:+.1f}%</b>。但在承擔每年約 {hurdle_rate_annual:.1f}% 的隨借隨還高利息下，實質淨超額為 <b>{net_hurdle_alpha:+.1f}%</b>，主動選股效益被眾多持股相互抵消。"
+        else:
+            rating_title = "⚠️ 負 Alpha 警訊 (選股落後)"
+            rating_badge_color = "#ef4444"
+            rating_verdict = f"<b>[防守檢討警訊]</b> 年化純選股 Alpha 為 <b>{jensen_alpha_annual:+.1f}%</b>，落後市場同風險預期回報，扣除利息後淨超額為 <b>{net_hurdle_alpha:+.1f}%</b>。建議深度檢視 25 檔持股中營收或毛利轉弱之標的，進行汰弱留強、去蕪存菁。"
+
         kpi_cols = st.columns(6)
         with kpi_cols[0]:
             render_metric_card("真實本金 ROE", f"{net_equity_roe:+.1f}%", f"本金: {true_injected_capital/10000:.0f}萬", "#10b981" if net_equity_roe >= 0 else "#ef4444")
@@ -3329,15 +3426,15 @@ if hist_close is not None and not hist_close.empty:
                 sortino_color = "#ef4444"
             render_metric_card("索提諾比率 (年化)", f"{sortino_ratio:.2f}", f"夏普: {sharpe_ratio:.2f} | 近 {min_lookback_days} 天", sortino_color)
         with kpi_cols[3]:
-            render_metric_card("組合加權 Beta", f"{portfolio_weighted_beta:.2f}", f"連動度: {portfolio_weighted_beta:.1%}", "#38bdf8")
+            render_metric_card("組合加權 Beta", f"{portfolio_weighted_beta:.2f}", f"敏感度: {portfolio_weighted_beta:.2f}x | 預期: {capm_expected_return:+.1f}%", "#38bdf8")
         with kpi_cols[4]:
             render_metric_card("實質股票槓桿", f"{effective_stock_leverage_mv:.2f}x", f"現股市值: {total_stock_market_value/10000:.0f}萬", "#f59e0b" if effective_stock_leverage_mv > 1.2 else "#38bdf8")
         with kpi_cols[5]:
             render_metric_card("本金歸零極限", f"-{wipeout_drop_pct:.1f}%", "現股下跌極限承受力", "#ef4444")
 
         # ── ⚔️ 大盤戰績對決看板 (Benchmark Comparison Banner) ──
-        badge_twii = f"🚀 領先加權 {excess_vs_twii:+.2f}%" if excess_vs_twii >= 0 else f"📉 落後加權 {excess_vs_twii:+.2f}%"
-        badge_otc = f"🚀 領先櫃買 {excess_vs_otc:+.2f}%" if excess_vs_otc >= 0 else f"📉 落後櫃買 {excess_vs_otc:+.2f}%"
+        badge_twii = f"🚀 領先 {excess_vs_twii:+.2f}%" if excess_vs_twii >= 0 else f"📉 落後 {excess_vs_twii:+.2f}%"
+        badge_otc = f"🚀 領先 {excess_vs_otc:+.2f}%" if excess_vs_otc >= 0 else f"📉 落後 {excess_vs_otc:+.2f}%"
         color_twii = "#10b981" if excess_vs_twii >= 0 else "#ef4444"
         color_otc = "#10b981" if excess_vs_otc >= 0 else "#ef4444"
         color_port = "#10b981" if portfolio_period_return >= 0 else "#ef4444"
@@ -3348,11 +3445,60 @@ if hist_close is not None and not hist_close.empty:
                 st.markdown(f"<div style='font-size:12px; color:gray; font-weight:600;'>💼 投組近 {min_lookback_days} 天累積報酬</div>", unsafe_allow_html=True)
                 st.markdown(f"<div style='font-size:22px; font-weight:800; color:{color_port}; margin-top:2px;'>{portfolio_period_return:+.2f}%</div>", unsafe_allow_html=True)
             with c_bt2:
-                st.markdown(f"<div style='font-size:12px; color:gray; font-weight:600;'>🏛️ 加權指數 (^TWII) 同期戰況</div>", unsafe_allow_html=True)
-                st.markdown(f"<div style='font-size:16px; font-weight:700; margin-top:5px;'>{twii_period_return:+.2f}% <span style='font-size:13.5px; color:{color_twii}; font-weight:800; margin-left:8px;'>({badge_twii})</span></div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='font-size:12px; color:gray; font-weight:600;'>{twii_disp_title}</div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='font-size:16px; font-weight:700; margin-top:5px;'>{twii_selected_return:+.2f}% <span style='font-size:13.5px; color:{color_twii}; font-weight:800; margin-left:8px;'>({badge_twii})</span></div>", unsafe_allow_html=True)
             with c_bt3:
-                st.markdown(f"<div style='font-size:12px; color:gray; font-weight:600;'>🏬 {otc_display_name} 同期戰況</div>", unsafe_allow_html=True)
-                st.markdown(f"<div style='font-size:16px; font-weight:700; margin-top:5px;'>{otc_period_return:+.2f}% <span style='font-size:13.5px; color:{color_otc}; font-weight:800; margin-left:8px;'>({badge_otc})</span></div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='font-size:12px; color:gray; font-weight:600;'>{otc_disp_title}</div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='font-size:16px; font-weight:700; margin-top:5px;'>{otc_selected_return:+.2f}% <span style='font-size:13.5px; color:{color_otc}; font-weight:800; margin-left:8px;'>({badge_otc})</span></div>", unsafe_allow_html=True)
+            
+            st.caption(bm_note, unsafe_allow_html=True)
+
+        # ── 🎖️ 主動選股品質檢驗儀 (Active Alpha & Performance Attribution) ──
+        with st.container(border=True):
+            st.markdown("<div style='font-size:14px; font-weight:700; color:#38bdf8; margin-bottom:8px;'>🎖️ 【主動選股品質檢驗儀】Alpha 歸因與實質淨勝率診斷</div>", unsafe_allow_html=True)
+            col_a1, col_a2, col_a3, col_a4 = st.columns(4)
+            with col_a1:
+                render_metric_card(
+                    "年化詹森阿爾法 (Jensen's Alpha)",
+                    f"{jensen_alpha_annual:+.2f}%",
+                    f"期間: {jensen_alpha_period:+.2f}% | 扣除Beta選股實力",
+                    "#10b981" if jensen_alpha_annual >= 0 else "#ef4444"
+                )
+            with col_a2:
+                ir_color = "#10b981" if ir_ratio >= 0.5 else ("#38bdf8" if ir_ratio >= 0.0 else "#ef4444")
+                render_metric_card(
+                    "資訊比率 (Information Ratio)",
+                    f"{ir_ratio:.2f}",
+                    f"年化追蹤誤差: {tracking_error_annual:.1f}% | 超額穩定度",
+                    ir_color
+                )
+            with col_a3:
+                net_alpha_color = "#10b981" if net_hurdle_alpha >= 0 else ("#f59e0b" if net_hurdle_alpha >= -3.0 else "#ef4444")
+                render_metric_card(
+                    "實質淨阿爾法 (扣除融資利息)",
+                    f"{net_hurdle_alpha:+.2f}%",
+                    f"借貸成本門檻: -{hurdle_rate_annual:.1f}%/年 | 真正落袋",
+                    net_alpha_color
+                )
+            with col_a4:
+                render_metric_card(
+                    "主動選股品質評級",
+                    rating_title,
+                    f"近 {min_lookback_days} 天動能綜合評定",
+                    rating_badge_color
+                )
+
+            st.markdown(f"<div style='font-size:13.5px; line-height:1.6; margin-top:8px; padding:10px 14px; background-color:rgba(56, 189, 248, 0.06); border-radius:8px; border-left: 3.5px solid {rating_badge_color};'>{rating_verdict}</div>", unsafe_allow_html=True)
+
+            # 持股集中度與擬指數化診斷提示
+            top5_weight = active_stock_df.nlargest(5, 'Weight(%)')['Weight(%)'].sum() if not active_stock_df.empty else 0.0
+            concentration_note = (
+                f"⚠️ **持股集中度診斷**：目前有效持股共 **{len(active_stock_df)} 檔**，前 5 大持股佔比僅 **{top5_weight:.1f}%**。"
+                f"檔數過於分散使整體投組鈍化為擬指數（Closet Indexing），在每年高達 6.45% 隨借隨還利息成本下，建議可適度去蕪存菁，將資金聚焦 8～12 檔基本面核心以拉開實質 Alpha。"
+                if len(active_stock_df) >= 20 and top5_weight < 50
+                else f"💡 **持股集中度診斷**：目前有效持股共 **{len(active_stock_df)} 檔**，前 5 大持股佔比達 **{top5_weight:.1f}%**，集中度適中，有利發揮選股爆發力。"
+            )
+            st.caption(concentration_note)
 
         # AI Health Check: [槓桿波動與狀態提示]
         if has_loan:
