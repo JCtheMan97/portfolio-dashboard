@@ -19,6 +19,7 @@ import requests
 from bs4 import BeautifulSoup
 from io import StringIO
 import hmac
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 warnings.filterwarnings('ignore')
 
