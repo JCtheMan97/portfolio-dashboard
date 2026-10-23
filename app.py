@@ -18,7 +18,7 @@ except Exception:
 import requests
 from bs4 import BeautifulSoup
 from io import StringIO
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import hmac
 
 warnings.filterwarnings('ignore')
 
@@ -31,37 +31,58 @@ st.set_page_config(
 )
 
 # ------------------------------------------------------------
-# 部署安全性：簡單的密碼驗證機制 (基於 st.secrets)
+# 部署安全性：強化型防崩潰密碼驗證機制 (基於 st.secrets 與 hmac)
 # ------------------------------------------------------------
 def check_password():
-    """Returns True if the user had the correct password."""
+    """驗證使用者密碼；若未配置 secrets 則自動放行，具備防 KeyError 與多格式相容保護。"""
+    target_pwd = None
     try:
-        if not st.secrets or "auth" not in st.secrets or "password" not in st.secrets["auth"]:
-            return True
+        if hasattr(st, "secrets") and st.secrets is not None:
+            # 1. 支援 [auth] 區塊: [auth] password = "..."
+            if "auth" in st.secrets:
+                auth_sec = st.secrets["auth"]
+                if isinstance(auth_sec, dict) and "password" in auth_sec:
+                    target_pwd = str(auth_sec["password"]).strip()
+                elif hasattr(auth_sec, "get"):
+                    target_pwd = str(auth_sec.get("password", "")).strip()
+            # 2. 支援最外層配置: password = "..."
+            if not target_pwd and "password" in st.secrets:
+                target_pwd = str(st.secrets["password"]).strip()
+            # 3. 支援 [general] 或 [passwords]
+            if not target_pwd and "general" in st.secrets and "password" in st.secrets["general"]:
+                target_pwd = str(st.secrets["general"]["password"]).strip()
+            if not target_pwd and "passwords" in st.secrets and "password" in st.secrets["passwords"]:
+                target_pwd = str(st.secrets["passwords"]["password"]).strip()
     except Exception:
+        target_pwd = None
+
+    # 若未在 Streamlit Secrets 設定密碼，直接放行（本機開發或無密碼公開模式）
+    if not target_pwd:
         return True
 
     def password_entered():
-        if st.session_state["password"] == st.secrets["auth"]["password"]:
+        user_input = str(st.session_state.get("password_input", "")).strip()
+        if user_input and hmac.compare_digest(user_input, target_pwd):
             st.session_state["password_correct"] = True
-            del st.session_state["password"]
+            st.session_state["password_input"] = ""
         else:
             st.session_state["password_correct"] = False
+            st.session_state["password_input"] = ""
 
     if "password_correct" not in st.session_state:
         st.text_input(
-            "🔑 請輸入密碼解鎖 dashboard",
+            "🔑 請輸入密碼解鎖 JC 投資組合戰情室",
             type="password",
             on_change=password_entered,
-            key="password",
+            key="password_input",
         )
         return False
     elif not st.session_state["password_correct"]:
         st.text_input(
-            "🔑 請輸入密碼解鎖 dashboard",
+            "🔑 請輸入密碼解鎖 JC 投資組合戰情室",
             type="password",
             on_change=password_entered,
-            key="password",
+            key="password_input",
         )
         st.error("😕 密碼錯誤，請重新輸入！")
         return False
